@@ -1,0 +1,9 @@
+/* ==========================================================================
+   BarGestão Standard — Design System Aero
+   Arquivo: main.css
+   Ponto de entrada mestre dos estilos modulares
+   ========================================================================== */
+
+@import './theme.css';
+@import './layout.css';
+@import './components.css';

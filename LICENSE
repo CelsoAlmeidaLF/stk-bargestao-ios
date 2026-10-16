@@ -1,0 +1,28 @@
+Copyright (c) 2026 Celso de Almeida Leite F (Systekna). Todos os direitos reservados.
+
+LICENÇA PROPRIETÁRIA
+
+Este repositório é público apenas para consulta. A publicação do código não concede
+nenhuma licença, expressa ou implícita.
+
+Sem autorização prévia e por escrito do titular, é proibido:
+  - copiar, reproduzir ou redistribuir este código, no todo ou em parte;
+  - modificar, adaptar ou criar obras derivadas;
+  - usar este código, ou obras derivadas, para fins comerciais ou não comerciais;
+  - sublicenciar, vender ou disponibilizar este código a terceiros.
+
+Ver o código pela interface do GitHub e criar forks dentro do próprio GitHub são
+permitidos apenas na medida exigida pelos Termos de Serviço do GitHub. Isso não
+autoriza nenhum outro uso.
+
+COMPONENTES DE TERCEIROS
+
+Componentes de terceiros incluídos neste repositório continuam sob suas próprias
+licenças, que prevalecem sobre este aviso para esses arquivos:
+  - Fontes Space Grotesk e IBM Plex Mono: SIL Open Font License 1.1.
+  - Lista de palavras BIP39 em português (bitcoin/bips): licença original do projeto BIP39.
+
+O SOFTWARE É FORNECIDO "NO ESTADO EM QUE SE ENCONTRA", SEM GARANTIA DE QUALQUER TIPO.
+O TITULAR NÃO SE RESPONSABILIZA POR DANOS DECORRENTES DO SEU USO.
+
+Pedidos de licença: https://github.com/CelsoAlmeidaLF

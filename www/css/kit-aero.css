@@ -1,0 +1,114 @@
+/* ==========================================================================
+   BarGestão Standard — ponte entre o kit de segurança Systekna e o Aero 2.0
+   Arquivo: kit-aero.css (carregado depois de main.css)
+   O kit (stk-pkg-secure-ui.css) usa --surface, --surface-2, --ink-dim, --up, --down e --info;
+   sem eles caía no tema escuro padrão, com o --ink escuro do Aero por cima (texto ilegível).
+   Não edite a cópia do kit: ajuste aqui.
+   ========================================================================== */
+
+:root {
+  --surface: var(--panel-solid);
+  --surface-2: #f2f6fc;
+  --ink-dim: var(--muted);
+  --up: var(--good);
+  --down: var(--bad);
+  --info: var(--accent);
+}
+
+/* Tela travada: mesmo fundo do app */
+html.vault-locked body {
+  background: var(--bg-gradient);
+  color: var(--ink);
+}
+
+/* Tipografia do app em tudo que o kit desenha */
+#vaultGate, #vaultGate *, .vault-dialog, .vault-dialog *, .fs-sheet, .fs-sheet *, .vp-drawer, .vp-drawer * {
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+}
+#vaultGate .vault-hash, #vaultRecoveryCode, #vaultRecovery, .vault-dialog .vault-hash {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace !important;
+}
+
+/* Cartão do cofre: vidro Aero */
+#vaultGate {
+  background: var(--panel);
+  border: 1px solid var(--line-highlight);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
+  -webkit-backdrop-filter: blur(var(--modal-blur));
+  backdrop-filter: blur(var(--modal-blur));
+}
+#vaultGate h1 { font-weight: 700; letter-spacing: -0.02em; }
+.vault-app-name { color: var(--ink); }
+.vault-eyebrow { font-weight: 600; letter-spacing: 0.06em; }
+.vault-badge {
+  color: #fff;
+  background: linear-gradient(135deg, #4b8df5, var(--accent));
+  border: 0;
+  box-shadow: 0 10px 22px -10px rgba(38, 109, 224, 0.8);
+}
+.vault-badge-danger { background: linear-gradient(135deg, #e0707a, var(--bad)); }
+
+/* PIN e teclado */
+.vault-dots span { background: var(--panel-solid); border-color: var(--line); }
+.vault-dots span::after { background: var(--accent); }
+#vaultGate .vault-keypad button {
+  background: var(--panel-solid);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+  font-weight: 600;
+}
+#vaultGate .vault-keypad button[data-key=del] { box-shadow: none; border-color: transparent; }
+#vaultGate .vault-keypad button:active { background: var(--accentSoft); }
+
+/* Campos */
+#vaultGate input:not(.vault-pin-input), .vault-dialog input,
+#vaultGate textarea, .vault-dialog textarea { background: var(--panel-solid); border-radius: var(--radius-md); }
+.vault-field, .vault-seed-label { font-weight: 600; letter-spacing: 0.02em; }
+
+/* Botões no padrão do app */
+.vault-primary, .vault-secondary { border-radius: var(--radius-md); font-size: 15px !important; font-weight: 600 !important; }
+.vault-primary { color: #fff; background: var(--accent); box-shadow: 0 12px 24px -14px rgba(38, 109, 224, 0.9); }
+.vault-primary:hover { background: var(--accent-hover); }
+.vault-secondary { background: var(--accentSoft); border-color: transparent; color: var(--accent); }
+.vault-link { font-size: 14px !important; }
+
+/* 12 palavras */
+.vault-seed li { background: var(--panel-solid); font-weight: 600; }
+.vault-hash, #vaultRecoveryCode { background: var(--accentSoft); border-color: color-mix(in srgb, var(--accent) 35%, transparent); color: var(--ink) !important; }
+
+/* Janelas do kit (PIN para exportar, Configurações) */
+.vault-dialog, .fs-sheet {
+  background: var(--panel-solid);
+  color: var(--ink);
+  border-color: var(--line);
+  box-shadow: var(--shadow-modal);
+}
+.vault-dialog { border-radius: var(--radius-lg); }
+.vault-dialog::backdrop, .fs-sheet::backdrop { background: rgba(20, 37, 60, 0.35); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+
+/* Menu do kit (3 pontos) dentro da barra de título: [⋮] [Nome do estabelecimento] [avatar] */
+.topbar .vp-bar { display: flex; flex: none; align-items: center; margin-right: 12px; }
+.topbar .vp-bar:empty { display: none; }
+#vaultProfileBtn {
+  width: 36px;
+  height: 36px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: var(--panel-solid);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+#vaultProfileBtn:hover { border-color: var(--accent); background: var(--accentSoft); }
+.topbar .top-title { flex: 1; min-width: 0; }
+.topbar .top-title > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.topbar .profile { flex: none; margin-left: 12px; }
+
+@media (max-width: 767px) {
+  #vaultProfileBtn { width: 34px; height: 34px; border-radius: 10px; }
+  .topbar .vp-bar { margin-right: 10px; }
+  /* No celular a barra fica só com [⋮] [nome] [avatar]; bloquear continua em Mais → Bloquear o aplicativo */
+  .topbar #top-logout { display: none; }
+}

@@ -1,0 +1,2 @@
+Edição Android (SQLite) do PWA stk-app-multi-cm/src, versão 2.8.0.
+Não edite aqui: edite local/ ou o patch e rode "npm run web".

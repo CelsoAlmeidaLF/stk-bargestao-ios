@@ -1,0 +1,16 @@
+node_modules/
+# Gerados no build (Mac do GitHub Actions)
+build/
+saida/
+ios/App/App/public/
+ios/App/App/capacitor.config.json
+ios/App/App/config.xml
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.DS_Store
+# Chaves de assinatura nunca entram no git
+*.p12
+*.mobileprovision
+*.jks
+*.pass

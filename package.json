@@ -1,0 +1,17 @@
+{
+  "name": "bargestao-ios",
+  "version": "2.8.0",
+  "private": true,
+  "description": "BarGestão (PWA stk-app-multi-cm) como app iOS com Capacitor: dados em SQLite no aparelho, governança online.",
+  "engines": { "node": ">=22" },
+  "dependencies": {
+    "@capacitor-community/sqlite": "8.1.1",
+    "@capacitor/core": "8.5.3",
+    "@capacitor/filesystem": "8.1.5",
+    "@capacitor/ios": "8.5.3",
+    "@capacitor/share": "8.0.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "8.5.3"
+  }
+}

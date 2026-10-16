@@ -1,0 +1,13 @@
+{
+  "appId": "br.com.systekna.bargestao",
+  "appName": "BarGestão",
+  "webDir": "www",
+  "server": {
+    "hostname": "celsoalmeidalf.github.io",
+    "iosScheme": "capacitor"
+  },
+  "ios": {
+    "contentInset": "automatic",
+    "webContentsDebuggingEnabled": false
+  }
+}

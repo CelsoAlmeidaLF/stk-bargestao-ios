@@ -1,0 +1,1207 @@
+/* Loaded before application code. The app starts only after successful unlock. */
+(function () {
+  'use strict';
+  const root = document.documentElement;
+  // Não abre dentro de moldura (iframe) de outro site: impede que o app seja embutido para enganar e capturar o PIN.
+  // O GitHub Pages não permite o cabeçalho frame-ancestors, então a proteção fica aqui.
+  if (window.top !== window.self) {
+    window.vaultReady = new Promise(() => {});
+    const gate = document.createElement('section'); gate.id = 'vaultGate';
+    const text = document.createElement('p'); text.textContent = 'Por segurança, este app só abre direto no navegador.';
+    const link = document.createElement('a'); link.href = location.href; link.target = '_top'; link.rel = 'noopener noreferrer'; link.textContent = 'Abrir o app';
+    gate.append(text, link); document.body.replaceChildren(gate);
+    return;
+  }
+  const appId = root.dataset.vaultApp;
+  const nativeStorage = window.stkArmazem; // edição Android: SQLite do aparelho
+  const LEGACY_KEYS = { 'cripito-sim': /^cripto[-:]/, 'cambio-sim': /^cambio_/, 'gerenc-fin': /^livro_caixa_/ };
+  const matches = key => Boolean(LEGACY_KEYS[appId] && LEGACY_KEYS[appId].test(key));
+  const icon = (name, size) => window.FinancIcons ? FinancIcons.svg(name, { size }) : '';
+  const appName = root.dataset.vaultName || document.title.split(/\s[—–-]\s/)[0].trim();
+  const VERSION = root.dataset.vaultVersion ? 'v' + root.dataset.vaultVersion : '';
+  const logoLink = document.querySelector('link[rel="apple-touch-icon"], link[rel="icon"]');
+  const PIN_STEPS = new Set(['unlock', 'join', 'create', 'create-confirm', 'recover-pin', 'recover-confirm']);
+  const keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'bio', '0', 'del'];
+  const bio = FinancVault.webauthn;
+  const DECLINED = 'financ-vault-bio-declined:' + appId, MANUAL_LOCK = 'financ-vault-manual-lock:' + appId;
+  // O tema segue o sistema do aparelho. Apaga a escolha manual que versões antigas salvavam.
+  try { nativeStorage.removeItem('financ-theme:' + appId); } catch (_) {}
+  // "Instalar app" aparece em Configurações quando o navegador oferece a instalação.
+  let installPrompt = null;
+  addEventListener('beforeinstallprompt', event => { event.preventDefault(); installPrompt = event; });
+  addEventListener('appinstalled', () => { installPrompt = null; });
+  const session = { take(key) { try { const v = window.stkSessao.getItem(key); window.stkSessao.removeItem(key); return v; } catch (_) { return null; } }, set(key) { try { window.stkSessao.setItem(key, '1'); } catch (_) {} } };
+
+  // O PIN é local ao cofre: gerenciadores de senha (Proton Pass, 1Password, Bitwarden, LastPass, Dashlane) não devem sugerir nem salvar.
+  const NO_AUTOFILL = ' autocomplete="off" data-protonpass-ignore="true" data-1p-ignore="true" data-lpignore="true" data-bwignore="true" data-form-type="other"';
+  function noAutofill(el) {
+    el.setAttribute('autocomplete', 'off');
+    for (const name of ['data-protonpass-ignore', 'data-1p-ignore', 'data-lpignore', 'data-bwignore']) el.setAttribute(name, 'true');
+    el.setAttribute('data-form-type', 'other');
+    return el;
+  }
+  // PIN só digitado: sem colar, arrastar nem preenchimento automático (Proton Pass, Google). Só entra o que vem do
+  // teclado (no PIN, um número por vez); o que aparece sem digitação é desfeito. input._typed guarda o último valor
+  // digitado: na confirmação, valor diferente dele foi posto por fora e é recusado.
+  function typedOnly(input, digits) {
+    noAutofill(input);
+    // Campo de senha chama o "salvar senha" do Google e o Proton Pass: o PIN vira texto mascarado.
+    if (digits && input.type === 'password') { input.type = 'text'; input.classList.add('vault-masked'); }
+    let typing = false;
+    input._typed = '';
+    for (const name of ['paste', 'drop', 'dragover', 'copy', 'cut']) input.addEventListener(name, event => event.preventDefault());
+    input.addEventListener('beforeinput', event => {
+      const kind = event.inputType || '', text = event.data || '';
+      const ok = kind.startsWith('delete') || (kind === 'insertText' && (!digits || text.length <= 1)) || (!digits && kind === 'insertCompositionText');
+      if (!ok) { event.preventDefault(); return; }
+      typing = true;
+    }, true);
+    input.addEventListener('input', event => {
+      if (event.isTrusted && typing) { typing = false; input._typed = input.value; return; }
+      typing = false;
+      event.stopImmediatePropagation();
+      input.value = input._typed;
+    }, true);
+    return input;
+  }
+  const wasTyped = input => input.value === input._typed;
+  // Apps com senhas/PIN próprios (ex.: equipe do BarGestão) usam a mesma proteção nos seus campos.
+  window.FinancTyped = Object.freeze({ only: typedOnly, wasTyped });
+  const panel = document.createElement('section'); panel.id = 'vaultGate';
+  panel.setAttribute('aria-labelledby', 'vaultTitle');
+  panel.innerHTML = '<div class="vault-brand"><img class="vault-logo" alt="" width="40" height="40" hidden><div><div class="vault-app-name"></div><div class="vault-eyebrow">' + icon('shield-check', 12) + 'SEGURANÇA LOCAL</div></div></div>'
+    + '<div class="vault-badge" id="vaultBadge">' + icon('lock', 22) + '</div>'
+    + '<h1 id="vaultTitle">Dados protegidos</h1><p id="vaultHelp"></p>'
+    + '<form id="vaultForm" novalidate' + NO_AUTOFILL + '>'
+    + '<label id="vaultPasswordLabel" class="vault-field" hidden>Senha<input id="vaultPassword" type="password"' + NO_AUTOFILL + ' autocapitalize="none" spellcheck="false" maxlength="256"></label>'
+    + '<label id="vaultRecoveryLabel" class="vault-field" hidden>12 palavras ou código de 12 caracteres<textarea id="vaultRecovery"' + NO_AUTOFILL + ' autocapitalize="none" autocorrect="off" spellcheck="false" rows="3" placeholder="abacate abaixo … ou XXXX-XXXX-XXXX"></textarea></label>'
+    + '<div class="vault-pin-wrap" id="vaultPinWrap"><input id="vaultPin" name="vault-pin" class="vault-pin-input"' + NO_AUTOFILL + ' type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6" aria-label="PIN de 6 números" aria-describedby="vaultHelp vaultMessage">'
+    + '<div class="vault-dots" id="vaultDots" aria-hidden="true">' + '<span></span>'.repeat(6) + '</div></div>'
+    + '<div class="vault-keypad" id="vaultKeypad">' + keys.map(k => k === 'bio'
+      ? '<button type="button" tabindex="-1" data-key="bio" class="vault-key-bio is-off" aria-label="Desbloquear com biometria" title="Desbloquear com biometria">' + icon('fingerprint', 26) + '</button>'
+      : k === 'del'
+      ? '<button type="button" tabindex="-1" data-key="del" aria-label="Apagar">' + icon('delete', 22) + '</button>'
+      : '<button type="button" tabindex="-1" data-key="' + k + '">' + k + '</button>').join('') + '</div>'
+    + '<button id="vaultSubmit" class="vault-primary" type="submit">Desbloquear</button></form>'
+    + '<div class="vault-footer"><button id="vaultBack" class="vault-link" type="button" hidden>' + icon('arrow-left', 16) + 'Voltar</button><button id="vaultRecover" class="vault-link" type="button">' + icon('key', 16) + 'Esqueci o PIN</button></div>'
+    + '<p id="vaultMessage" role="alert"></p>'
+    + (VERSION ? '<small class="vault-version"></small>' : '');
+  panel.querySelector('.vault-app-name').textContent = appName;
+  if (VERSION) panel.querySelector('.vault-version').textContent = VERSION;
+  if (logoLink) { const logo = panel.querySelector('.vault-logo'); logo.src = logoLink.getAttribute('href'); logo.hidden = false; }
+  document.body.append(panel);
+  const get = id => document.getElementById(id);
+  const status = document.createElement('div'); status.id = 'vaultSaveError'; status.setAttribute('role', 'alert'); document.body.append(status);
+  let resolveReady, locking = false, lastActivity = Date.now(), failedAttempts = 0, blocked = false, busy = false;
+  let step = 'unlock', firstPin = '', recoveryInput = '', countdown = null, bioAvailable = false;
+  window.vaultReady = new Promise(resolve => { resolveReady = resolve; });
+  const vault = new FinancVault.Vault(nativeStorage, appId, error => {
+    const full = error && (error.name === 'QuotaExceededError' || /quota/i.test(error.message || ''));
+    status.textContent = full ? 'Não foi possível salvar: o espaço do navegador acabou. Faça uma cópia de segurança (Configurações → Seus dados) e apague registros antigos.'
+      : 'Não foi possível salvar as últimas alterações. Mantenha esta página aberta e tente bloquear novamente para salvar.';
+  }, { dataStore: null }); // edição Android: tudo no SQLite (stkArmazem)
+  // Tentativas erradas de PIN: contador gravado (vale ao recarregar e em todos os apps do aparelho).
+  const guard = new FinancVault.PinGuard(nativeStorage);
+  const guardSteps = () => step === 'unlock' || step === 'join';
+  const guardLocked = () => guardSteps() && guard.state().locked;
+  const GUARD_LOCKED_MSG = 'O PIN foi bloqueado depois de 10 tentativas erradas. Use a biometria ou "Esqueci o PIN" (12 palavras) para criar um PIN novo.';
+  window.secureStorage = vault;
+  // Uma aba por vez. Ao recarregar (bloqueio, atualização do app) a página anterior ainda pode segurar a trava
+  // por alguns instantes, e no celular uma aba congelada em segundo plano segura sem aparecer: por isso tenta
+  // de novo antes de desistir e oferece assumir o controle nesta aba.
+  const LOCK_NAME = 'financ-vault:' + appId, TAKEOVER = 'financ-vault-takeover:' + appId;
+  const TAB_BUSY = 'O aplicativo está aberto em outra aba ou janela.';
+  let releaseTab, tabOwned = false;
+  function holdTab(options) {
+    return new Promise((resolve, reject) => {
+      navigator.locks.request(LOCK_NAME, options, async lock => {
+        if (!lock) { resolve(false); return; }
+        tabOwned = true; resolve(true);
+        await new Promise(done => { releaseTab = done; });
+      }).catch(error => { if (tabOwned) lostTab(); else reject(error); });
+    });
+  }
+  async function acquireTab() {
+    if (!navigator.locks) throw new Error('Este navegador não suporta o bloqueio seguro de abas. Use um navegador atualizado.');
+    if (session.take(TAKEOVER)) { await holdTab({ steal: true }); return; }
+    for (let i = 0; i < 16; i++) {
+      if (await holdTab({ ifAvailable: true })) return;
+      await new Promise(done => setTimeout(done, 250));
+    }
+    throw new Error(TAB_BUSY);
+  }
+  function takeOver() { session.set(TAKEOVER); window.stkRecarregar(); }
+  // Outra aba assumiu: salva o que der (o cofre recusa gravar por cima de dados mais novos) e esquece a chave.
+  function lostTab() {
+    tabOwned = false; locking = true; root.classList.add('vault-locked'); dropSession();
+    const save = vault.key ? vault.flush().catch(() => {}) : Promise.resolve();
+    save.finally(() => vault.forget());
+    const old = get('vaultGate'); if (old) old.remove();
+    const gate = document.createElement('section'); gate.id = 'vaultGate';
+    gate.innerHTML = '<div class="vault-badge">' + icon('lock', 22) + '</div><h1>Aberto em outra aba</h1><p>Este aplicativo passou a ser usado em outra aba ou janela. Para continuar aqui, assuma o controle.</p>';
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'vault-primary'; button.textContent = 'Usar nesta aba';
+    button.onclick = takeOver; gate.append(button); document.body.append(gate);
+  }
+  const tabReady = acquireTab();
+  const block = error => {
+    blocked = true; get('vaultMessage').textContent = error.message; setBusy(true);
+    if (error.message !== TAB_BUSY || get('vaultTakeover')) return;
+    const button = document.createElement('button'); button.id = 'vaultTakeover'; button.type = 'button'; button.className = 'vault-secondary';
+    button.textContent = 'Usar nesta aba'; button.onclick = takeOver;
+    get('vaultMessage').after(button);
+  };
+  // Prevent an early unhandled rejection while the user is typing.
+  tabReady.catch(block);
+  const legacyCleanup = tabReady;
+
+  // Edição Android: sem IndexedDB não há chave de sessão; reabrir o app pede o PIN de novo.
+  const SESSION = 'financ-vault-session:' + appId, RELOAD_GRACE_MS = 5000;
+  const sessionReady = Promise.resolve();
+  function readSession() { try { return JSON.parse(window.stkSessao.getItem(SESSION)); } catch (_) { return null; } }
+  function saveSession(extra) { if (vault.session) { try { window.stkSessao.setItem(SESSION, JSON.stringify({ blob: vault.session, at: lastActivity, ...extra })); } catch (_) {} } }
+  function dropSession() { try { window.stkSessao.removeItem(SESSION); } catch (_) {} }
+  const savedSession = readSession();
+  // Enquanto reabre a sessão, mostra só o nome do app e a versão (sem piscar a tela de PIN).
+  const boot = document.createElement('div'); boot.id = 'vaultBoot'; boot.setAttribute('aria-live', 'polite');
+  boot.textContent = appName + (VERSION ? ' · ' + VERSION : '');
+  if (savedSession) { panel.style.visibility = 'hidden'; document.body.append(boot); }
+  async function resumeSession() {
+    try {
+      if (!savedSession || !savedSession.blob || typeof savedSession.at !== 'number' || !vault.exists) return false;
+      await legacyCleanup; await sessionReady;
+      await vault.resume(savedSession.blob);
+      // Só vale se a última interação foi há menos que o tempo de bloqueio automático.
+      const idle = Date.now() - savedSession.at;
+      if (idle < 0 || idle >= autoLockMs()) { vault.forget(); return false; }
+      // "Bloquear ao sair": recarregar esconde a página por instantes; ficar fora mais que isso exige o PIN.
+      const away = typeof savedSession.hiddenAt === 'number' ? Date.now() - savedSession.hiddenAt : 0;
+      if (vault.settings.lockOnHide && (away < 0 || away > RELOAD_GRACE_MS)) { vault.forget(); return false; }
+      return true;
+    } catch (_) { vault.forget(); return false; }
+  }
+
+  const pinInput = typedOnly(get('vaultPin'), true);
+  typedOnly(get('vaultPassword'), false);
+  const COPY = {
+    'unlock': ['Dados protegidos', 'Digite seu PIN de 6 números para abrir o aplicativo.', 'Desbloquear', 'lock'],
+    'join': ['Use seu PIN', 'Você já tem um PIN neste aparelho. Digite-o para abrir o ' + appName + '.', 'Entrar', 'shield'],
+    'create': ['Crie seu PIN', 'Escolha 6 números. O mesmo PIN vai abrir todos os apps deste aparelho.', 'Continuar', 'shield'],
+    'create-confirm': ['Confirme o PIN', 'Digite o mesmo PIN mais uma vez.', 'Criar PIN', 'shield'],
+    'recover-code': ['Recuperar acesso', 'Digite as 12 palavras (ou as 4 primeiras letras de cada) ou o código de 12 caracteres. Quem ainda não recebeu as palavras usa o código antigo de 8 blocos.', 'Continuar', 'key'],
+    'recover-pin': ['Novo PIN', 'Escolha um novo PIN de 6 números.', 'Continuar', 'key'],
+    'recover-confirm': ['Confirme o novo PIN', 'Digite o novo PIN mais uma vez.', 'Definir novo PIN', 'key'],
+  };
+  // Com senha longa (opção nas Configurações), abrir e entrar usam um campo de texto no lugar do teclado de PIN.
+  const passwordMode = () => (step === 'unlock' || step === 'join') && vault.secretKind === 'password';
+  const secretReady = () => passwordMode() ? get('vaultPassword').value.length > 0 : pinInput.value.length === 6;
+  function setBusy(value) {
+    busy = value;
+    const locked = guardLocked(), off = value || blocked || locked;
+    get('vaultSubmit').disabled = off || (PIN_STEPS.has(step) && !secretReady());
+    pinInput.disabled = off; get('vaultPassword').disabled = off;
+    panel.querySelectorAll('#vaultKeypad button').forEach(b => { b.disabled = b.dataset.key === 'bio' ? value || blocked : off; });
+  }
+  function refreshBiometric() {
+    const key = panel.querySelector('.vault-key-bio');
+    if (!key || !panel.isConnected) return; // app já aberto (o painel saiu da página) antes de a biometria responder
+    const show = step === 'unlock' && bioAvailable && Boolean(vault.biometric);
+    key.classList.toggle('is-off', !show);
+    key.tabIndex = show ? 0 : -1;
+    const secret = passwordMode() ? 'sua senha' : 'seu PIN';
+    if (step === 'unlock') get('vaultHelp').textContent = show ? 'Digite ' + secret + ' ou toque na digital para usar a biometria.' : 'Digite ' + secret + ' para abrir o aplicativo.';
+  }
+  function renderDots() {
+    const n = pinInput.value.length;
+    get('vaultDots').querySelectorAll('span').forEach((dot, i) => dot.classList.toggle('filled', i < n));
+    if (!busy && !blocked) get('vaultSubmit').disabled = PIN_STEPS.has(step) && !secretReady();
+  }
+  function go(next) {
+    step = next;
+    const [title, help, action, badge] = COPY[step];
+    get('vaultTitle').textContent = title; get('vaultHelp').textContent = help;
+    get('vaultSubmit').textContent = action;
+    get('vaultBadge').innerHTML = icon(badge, 22);
+    const pinStep = PIN_STEPS.has(step), usePassword = passwordMode();
+    get('vaultPinWrap').hidden = !pinStep || usePassword; get('vaultKeypad').hidden = !pinStep || usePassword;
+    get('vaultPasswordLabel').hidden = !usePassword; get('vaultPassword').value = '';
+    get('vaultRecover').innerHTML = icon('key', 16) + (usePassword ? 'Esqueci a senha' : 'Esqueci o PIN');
+    if (usePassword && step === 'join') { get('vaultTitle').textContent = 'Use sua senha'; get('vaultHelp').textContent = 'Você já tem uma senha neste aparelho. Digite-a para abrir o ' + appName + '.'; }
+    get('vaultRecoveryLabel').hidden = step !== 'recover-code';
+    get('vaultRecover').hidden = step !== 'unlock' && step !== 'join';
+    get('vaultBack').hidden = step === 'unlock' || step === 'join' || step === 'create';
+    pinInput.value = ''; get('vaultDots').classList.remove('vault-shake'); renderDots(); refreshBiometric();
+    if (!blocked) (usePassword ? get('vaultPassword') : pinStep ? pinInput : get('vaultRecovery')).focus({ preventScroll: true });
+  }
+  // Touch devices use the on-screen keypad; physical keyboards type into the input.
+  if (matchMedia('(pointer: coarse)').matches) pinInput.inputMode = 'none';
+  pinInput.oninput = () => {
+    pinInput.value = pinInput.value.replace(/\D/g, '').slice(0, 6);
+    pinInput._typed = pinInput.value; // digitado no teclado da tela ou no teclado físico (o resto é barrado em typedOnly)
+    if (pinInput.value) get('vaultDots').classList.remove('vault-shake');
+    renderDots();
+    if (pinInput.value.length === 6 && !busy) get('vaultForm').requestSubmit();
+  };
+  get('vaultKeypad').addEventListener('pointerdown', event => event.preventDefault());
+  get('vaultKeypad').onclick = event => {
+    const button = event.target.closest('button[data-key]');
+    if (!button || button.disabled) return;
+    const key = button.dataset.key;
+    if (key === 'bio') { unlockWithBiometric(false); return; }
+    pinInput.value = key === 'del' ? pinInput.value.slice(0, -1) : (pinInput.value + key).slice(0, 6);
+    pinInput.oninput();
+  };
+  get('vaultPinWrap').onclick = () => pinInput.focus();
+  get('vaultRecover').onclick = () => { get('vaultMessage').textContent = ''; go('recover-code'); };
+  get('vaultBack').onclick = () => {
+    get('vaultMessage').textContent = '';
+    go({ 'create-confirm': 'create', 'recover-code': firstStep(), 'recover-pin': 'recover-code', 'recover-confirm': 'recover-pin' }[step]);
+  };
+  function fail(message) {
+    get('vaultMessage').textContent = message;
+    const dots = get('vaultDots'); dots.classList.remove('vault-shake'); void dots.offsetWidth; dots.classList.add('vault-shake');
+    pinInput.value = ''; get('vaultPassword').value = ''; renderDots();
+  }
+  get('vaultPassword').oninput = () => renderDots();
+  // Sem cofre deste app: com FINANC ID no aparelho, só pede o PIN dele; sem, cria o PIN FINANC.
+  const firstStep = () => vault.exists ? 'unlock' : vault.identity.exists ? 'join' : 'create';
+  go(firstStep());
+  // Espera ou bloqueio que vieram de tentativas anteriores (recarregar a página não zera).
+  function waitGuard(message) {
+    const st = guard.state();
+    if (st.locked && guardSteps()) { get('vaultMessage').textContent = GUARD_LOCKED_MSG; setBusy(false); return true; }
+    if (st.waitMs <= 0 || !guardSteps()) return false;
+    const until = Date.now() + st.waitMs; clearInterval(countdown); setBusy(true);
+    const tick = () => {
+      const left = Math.ceil((until - Date.now()) / 1000);
+      if (left <= 0) { clearInterval(countdown); get('vaultMessage').textContent = message || ''; setBusy(false); pinInput.focus({ preventScroll: true }); return; }
+      const t = left >= 120 ? Math.ceil(left / 60) + ' min' : left + 's';
+      get('vaultMessage').textContent = (message ? message + ' ' : 'Muitas tentativas erradas. ') + 'Aguarde ' + t + '.';
+    };
+    tick(); countdown = setInterval(tick, 250);
+    return true;
+  }
+  waitGuard();
+
+  async function unlockWithBiometric(auto) {
+    const info = vault.biometric;
+    if (!info || busy || blocked || step !== 'unlock') return;
+    setBusy(true); get('vaultMessage').textContent = '';
+    try {
+      await legacyCleanup; await sessionReady;
+      const secret = await bio.evaluate(info.credentialId, info.prfSalt);
+      let status; try { status = await vault.unlockBiometric(secret); } finally { secret.fill(0); }
+      failedAttempts = 0; guard.reset(); get('vaultForm').reset();
+      if (status && status.seed) showSeed(status.seed, '', 'migrated'); else finish();
+    } catch (error) {
+      if (!auto) get('vaultMessage').textContent = error.name === 'NotAllowedError' ? 'Biometria cancelada ou não reconhecida. Use o PIN.'
+        : error.name === 'OperationError' ? 'Esta biometria não abre este cofre. Use o PIN e ative a biometria de novo.'
+        : error.name === 'SecurityError' ? 'A biometria só funciona com o app aberto em um domínio HTTPS ou em localhost. Use o PIN.' : error.message;
+      setBusy(false); pinInput.focus({ preventScroll: true });
+    }
+  }
+  const resumed = resumeSession().then(async ok => {
+    boot.remove();
+    if (!ok) { dropSession(); panel.style.visibility = ''; return ok; }
+    // FINANC ID antigo reaberto pela sessão (sem PIN): ganha as 12 palavras agora e mostra uma vez.
+    let status = {}; try { status = await vault.finishMigration(); } catch (_) {}
+    if (status.seed) { panel.style.visibility = ''; showSeed(status.seed, '', 'migrated'); } else finish();
+    return ok;
+  });
+  Promise.all([bio.available(), resumed]).then(([available, ok]) => {
+    bioAvailable = available;
+    if (ok) return;
+    refreshBiometric();
+    // Ao abrir o app, pede a biometria direto; após um bloqueio manual, espera o toque na digital.
+    const manual = session.take(MANUAL_LOCK);
+    if (available && vault.biometric && step === 'unlock' && !manual && document.visibilityState === 'visible') unlockWithBiometric(true);
+  });
+  function declined() { try { return nativeStorage.getItem(DECLINED) === '1'; } catch (_) { return true; } }
+  async function enrollBiometric(pin) {
+    await vault.verifyPin(pin);
+    // Ligado ao FINANC ID, a biometria vale para todos os apps: a credencial leva o nome FINANC.
+    const enrolled = vault.linked ? await bio.enroll('FINANC', 'financ') : await bio.enroll(appName, appId);
+    try { await vault.enableBiometric(pin, enrolled.credentialId, enrolled.prfSalt, enrolled.secret); }
+    finally { enrolled.secret.fill(0); }
+    try { nativeStorage.removeItem(DECLINED); } catch (_) {}
+  }
+  function biometricError(error) {
+    return error.name === 'NotAllowedError' ? 'Cadastro cancelado.' : error.name === 'InvalidStateError' ? 'Este aparelho já tem uma credencial para este app. Tente de novo.'
+      : error.name === 'OperationError' ? 'PIN incorreto.' : error.name === 'SecurityError' ? 'A biometria só funciona com o app aberto em um domínio HTTPS ou em localhost.' : error.message;
+  }
+  function offerBiometric(pin) {
+    if (!bioAvailable || vault.biometric || declined()) { finish(); return; }
+    panel.replaceChildren();
+    const badge = document.createElement('div'); badge.className = 'vault-badge'; badge.innerHTML = icon('fingerprint', 24);
+    const title = document.createElement('h1'); title.id = 'vaultTitle'; title.textContent = 'Desbloquear com biometria?';
+    const help = document.createElement('p'); help.textContent = 'Use a digital, o rosto ou o bloqueio de tela deste aparelho para abrir ' + (vault.linked ? 'os apps' : 'o app') + '. O PIN continua funcionando.';
+    const enable = document.createElement('button'); enable.type = 'button'; enable.className = 'vault-primary';
+    enable.innerHTML = icon('fingerprint', 18) + '<span>Ativar biometria</span>';
+    const skip = document.createElement('button'); skip.type = 'button'; skip.className = 'vault-secondary'; skip.textContent = 'Agora não';
+    const message = document.createElement('p'); message.id = 'vaultMessage'; message.setAttribute('role', 'alert');
+    enable.onclick = async () => {
+      enable.disabled = skip.disabled = true; message.textContent = '';
+      try { await enrollBiometric(pin); pin = ''; finish(); }
+      catch (error) { message.textContent = biometricError(error); enable.disabled = skip.disabled = false; }
+    };
+    skip.onclick = () => { try { nativeStorage.setItem(DECLINED, '1'); } catch (_) {} pin = ''; finish(); };
+    panel.append(badge, title, help, enable, skip, message);
+    enable.focus();
+  }
+
+  function finish() {
+    try { vault.cleanupLegacy(matches); } catch (_) {}
+    root.classList.remove('vault-locked'); panel.remove();
+    mountProfile();
+    lastActivity = Date.now(); saveSession();
+    // Grava o que ficou pendente ao abrir (passagem dos dados para o IndexedDB, data do primeiro uso) e então limpa o legado.
+    vault.flush().then(() => { try { vault.cleanupLegacy(matches); } catch (_) {} }).catch(error => vault.onError(error));
+    ensurePersisted();
+    setTimeout(remindBackup, 1500);
+    // O app só começa depois de o certificado antigo dele passar para o certificado FINANC.
+    adoptCertificate().catch(() => {}).then(resolveReady);
+  }
+  // 12 palavras + código de 12 caracteres: mostrados uma vez ao criar ou migrar (depois, em Configurações com o PIN).
+  // kind: 'new' (PIN FINANC criado) ou 'migrated' (o código antigo de 8 blocos virou 12 palavras).
+  function seedMarkup(seed) {
+    return '<ol class="vault-seed">' + seed.words.map(w => '<li>' + esc(w) + '</li>').join('') + '</ol>'
+      + '<p class="vault-seed-label">Ou o código de 12 caracteres:</p><p class="vault-hash">' + esc(seed.hash) + '</p>';
+  }
+  const SEED_HELP = 'As palavras (ou o código) recuperam o PIN de todos os apps e abrem seus backups em qualquer aparelho. Quem tiver este papel abre seus backups: não fotografe nem envie por mensagem.';
+  function showSeed(seed, pin, kind) {
+    panel.replaceChildren();
+    panel.classList.add('vault-recovery');
+    const box = document.createElement('div');
+    box.innerHTML = '<div class="vault-badge">' + icon('key', 22) + '</div><h1 id="vaultTitle"></h1><p></p>' + seedMarkup(seed);
+    box.querySelector('h1').textContent = kind === 'migrated' ? 'Agora são 12 palavras' : 'Guarde suas 12 palavras';
+    box.querySelector('p').textContent = (kind === 'migrated' ? 'O código antigo de 8 blocos deixou de valer. ' : '') + SEED_HELP + ' Você pode vê-las de novo em Configurações.';
+    const pdf = document.createElement('button'); pdf.type = 'button'; pdf.className = 'vault-secondary';
+    pdf.innerHTML = icon('download', 16) + '<span>Baixar PDF para imprimir</span>';
+    pdf.onclick = () => downloadSeedPdf(seed);
+    const done = document.createElement('button'); done.id = 'vaultRecoveryDone'; done.type = 'button'; done.className = 'vault-primary';
+    done.textContent = 'Guardei as palavras'; done.onclick = () => { if (pin) offerBiometric(pin); else finish(); };
+    panel.append(...box.childNodes, pdf, done);
+    done.focus();
+  }
+  // PDF de uma página, montado aqui mesmo (sem biblioteca nem servidor): palavras, código e instruções.
+  const WIN_ANSI = { '•': 0x95, '–': 0x96, '—': 0x97, '“': 0x93, '”': 0x94, '‘': 0x91, '’': 0x92 };
+  const pdfText = text => '(' + Array.from(String(text), ch => {
+    const code = WIN_ANSI[ch] || ch.charCodeAt(0);
+    if (ch === '(' || ch === ')' || ch === '\\') return '\\' + ch;
+    return code >= 32 && code < 127 ? ch : code <= 255 ? '\\' + code.toString(8).padStart(3, '0') : '?';
+  }).join('') + ')';
+  function seedPdf(seed) {
+    const out = [], line = (font, size, x, y, text) => out.push('BT /' + font + ' ' + size + ' Tf ' + x + ' ' + y + ' Td ' + pdfText(text) + ' Tj ET');
+    const today = new Date().toLocaleDateString('pt-BR');
+    line('F2', 18, 50, 790, 'FINANC – suas 12 palavras');
+    line('F1', 10, 50, 772, 'Gerado em ' + today + ' no aparelho. Vale para todos os apps FINANC deste endereço.');
+    out.push('0.6 G 1 w 50 548 495 200 re S');
+    seed.words.forEach((w, i) => line('F3', 15, 66 + (i % 3) * 160, 718 - Math.floor(i / 3) * 46, (i + 1 < 10 ? ' ' : '') + (i + 1) + '. ' + w));
+    line('F1', 11, 50, 518, 'Ou o código de 12 caracteres (vale o mesmo que as palavras):');
+    line('F3', 24, 50, 488, seed.hash);
+    ['• As palavras (ou o código) recuperam o PIN de todos os apps se você esquecer.',
+      '• Elas também abrem seus backups em qualquer aparelho, sem outra senha.',
+      '• Quem tiver este papel abre seus backups: não fotografe nem envie por mensagem.',
+      '• Depois de imprimir, apague este arquivo PDF do celular e do computador.',
+      '• Guarde o papel em local seguro, longe do celular.'].forEach((t, i) => line('F1', 11, 50, 440 - i * 20, t));
+    const stream = out.join('\n');
+    const objs = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R /F3 6 0 R >> >> /Contents 7 0 R >>',
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>',
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>',
+      '<< /Length ' + stream.length + ' >>\nstream\n' + stream + '\nendstream'];
+    let pdf = '%PDF-1.4\n'; const offsets = [];
+    objs.forEach((body, i) => { offsets.push(pdf.length); pdf += (i + 1) + ' 0 obj\n' + body + '\nendobj\n'; });
+    const xref = pdf.length;
+    pdf += 'xref\n0 ' + (objs.length + 1) + '\n0000000000 65535 f \n' + offsets.map(o => String(o).padStart(10, '0') + ' 00000 n \n').join('')
+      + 'trailer\n<< /Size ' + (objs.length + 1) + ' /Root 1 0 R >>\nstartxref\n' + xref + '\n%%EOF\n';
+    return new Blob([pdf], { type: 'application/pdf' });
+  }
+  function downloadSeedPdf(seed) {
+    window.stkSalvarArquivo(seedPdf(seed), 'financ-12-palavras.pdf'); // edição Android
+  }
+  window.FinancSeedPdf = seedPdf; // usado nos testes
+  // kind: 'new' (PIN FINANC criado), 'renewed' (código usado foi trocado) ou 'migrated' (primeiro app ligado ao FINANC ID).
+  function showRecoveryCode(recovery, pin, kind = 'new') {
+    // Show once and require acknowledgement before entering the application.
+    panel.replaceChildren();
+    panel.classList.add('vault-recovery');
+    const badge = document.createElement('div'); badge.className = 'vault-badge'; badge.innerHTML = icon('key', 22);
+    const title = document.createElement('h1'); title.id = 'vaultTitle'; title.textContent = kind === 'renewed' ? 'Seu novo código de recuperação' : kind === 'migrated' ? 'Agora é um PIN só' : 'Guarde seu código de recuperação';
+    const help = document.createElement('p');
+    help.textContent = (kind === 'migrated' ? 'Este PIN passa a abrir todos os apps deste aparelho. O código antigo deste app deixou de valer; use este no lugar. '
+      : kind === 'renewed' ? 'O código usado deixou de valer. ' : '')
+      + 'Este código redefine o PIN de todos os apps. Guarde-o offline, separado dos backups. Ele não será exibido novamente.';
+    const code = document.createElement('p'); code.id = 'vaultRecoveryCode'; code.textContent = recovery;
+    const copy = document.createElement('button'); copy.type = 'button'; copy.className = 'vault-secondary';
+    copy.innerHTML = icon('copy', 16) + '<span>Copiar código</span>';
+    copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(recovery); copy.innerHTML = icon('check', 16) + '<span>Copiado</span>'; }
+      catch (_) { getSelection().selectAllChildren(code); }
+    };
+    const done = document.createElement('button'); done.id = 'vaultRecoveryDone'; done.type = 'button'; done.className = 'vault-primary';
+    done.textContent = 'Guardei o código'; done.onclick = () => offerBiometric(pin);
+    panel.append(badge, title, help, code, copy, done);
+    done.focus();
+  }
+  get('vaultForm').onsubmit = async event => {
+    event.preventDefault();
+    if (busy || blocked) return;
+    get('vaultMessage').textContent = '';
+    const pin = passwordMode() ? get('vaultPassword').value : pinInput.value;
+    if (PIN_STEPS.has(step) && !wasTyped(passwordMode() ? get('vaultPassword') : pinInput)) { fail(passwordMode() ? 'Digite a senha.' : 'Digite o PIN no teclado.'); return; }
+    if (step === 'recover-code') {
+      recoveryInput = get('vaultRecovery').value.trim();
+      try { await FinancVault.seed.parseSecret(recoveryInput); }
+      catch (error) { get('vaultMessage').textContent = error.code === 'SEED_INVALID' ? error.message : 'Palavras ou código inválidos.'; return; }
+      go('recover-pin'); return;
+    }
+    if (passwordMode() ? !pin : !FinancVault.pinOK(pin)) { fail(passwordMode() ? 'Digite sua senha.' : 'Digite exatamente 6 números.'); return; }
+    if (step === 'create' || step === 'recover-pin') { firstPin = pin; go(step === 'create' ? 'create-confirm' : 'recover-confirm'); return; }
+    if ((step === 'create-confirm' || step === 'recover-confirm') && pin !== firstPin) {
+      firstPin = ''; go(step === 'create-confirm' ? 'create' : 'recover-pin'); fail('Os PINs não coincidem. Comece de novo.'); return;
+    }
+    if (guardSteps() && vault.identity.exists && waitGuard()) return;
+    setBusy(true);
+    try {
+      await legacyCleanup; await sessionReady;
+      if (!crypto.subtle) throw new Error('Abra o aplicativo em HTTPS ou localhost para proteger os dados.');
+      const initial = Object.create(null);
+      if (!vault.exists) for (let i = 0; i < nativeStorage.length; i++) { const key = nativeStorage.key(i); if (matches(key)) initial[key] = nativeStorage.getItem(key); }
+      if (step === 'recover-confirm') {
+        const status = await vault.resetPassword(recoveryInput, pin, undefined, initial);
+        done(); await afterUnlock(status, pin, 'renewed');
+      } else if (!vault.exists) {
+        const created = await vault.create(pin, initial);
+        done(); if (created) showSeed(created, pin, 'new'); else offerBiometric(pin);
+      } else {
+        let status;
+        try { status = await vault.unlock(pin); }
+        catch (error) {
+          if (error.code !== 'LEGACY_PIN') throw error;
+          // PIN FINANC certo, mas este app ainda tem o PIN antigo dele: pede uma única vez.
+          setBusy(false);
+          const oldPin = await window.askSecret('Digite o PIN antigo do ' + appName + ' (só desta vez) para passar a usar o PIN único:');
+          if (!oldPin) { fail('Sem o PIN antigo, este app continua bloqueado.'); return; }
+          setBusy(true);
+          await vault.unlockLegacy(oldPin, pin);
+          status = {};
+        }
+        done(); await afterUnlock(status, pin, 'migrated');
+      }
+    } catch (error) {
+      failedAttempts += 1;
+      const wrong = error.name === 'OperationError';
+      // PIN do aparelho errado: conta no contador gravado (espera crescente, bloqueio na 10ª).
+      if (wrong && guardSteps()) {
+        const st = guard.fail();
+        fail(passwordMode() ? 'Senha incorreta.' : 'PIN incorreto.' + (st.left > 0 && st.left <= 5 ? ' Restam ' + st.left + ' tentativas.' : ''));
+        if (!waitGuard(get('vaultMessage').textContent)) setBusy(false);
+        return;
+      }
+      const delay = wrong ? Math.min(30000, failedAttempts * failedAttempts * 500) : 0;
+      if ((wrong || error.code === 'SEED_INVALID') && step === 'recover-confirm') go('recover-code');
+      fail(wrong ? (step === 'recover-code' ? 'Palavras ou código incorretos.' : passwordMode() ? 'Senha incorreta.' : 'PIN incorreto.') : error.message);
+      if (delay) {
+        const message = get('vaultMessage').textContent; const until = Date.now() + delay;
+        clearInterval(countdown);
+        const tick = () => {
+          const left = Math.ceil((until - Date.now()) / 1000);
+          if (left <= 0) { clearInterval(countdown); get('vaultMessage').textContent = message; setBusy(false); pinInput.focus(); return; }
+          get('vaultMessage').textContent = message + ' Aguarde ' + left + 's.';
+        };
+        tick(); countdown = setInterval(tick, 250);
+      } else setBusy(false);
+    }
+  };
+  function done() { failedAttempts = 0; guard.reset(); firstPin = ''; recoveryInput = ''; get('vaultForm').reset(); }
+  // Depois de abrir: mostra o código FINANC novo, ou liga o app ao PIN FINANC quando os PINs eram diferentes.
+  async function afterUnlock(status, pin, kind) {
+    if (status.needsIdentityPin) { const linked = await askIdentityPin(); if (linked) { pin = linked.pin; if (linked.status.seed) status = linked.status; } }
+    if (status.seed) showSeed(status.seed, pin, kind === 'renewed' ? 'new' : 'migrated');
+    else if (status.recovery) showRecoveryCode(status.recovery, pin, kind);
+    else offerBiometric(pin);
+  }
+  async function askIdentityPin() {
+    const text = vault.identity.kind === 'password';
+    let label = text ? 'Os outros apps usam uma senha. Digite essa senha para usar a mesma em todos (Cancelar mantém o PIN deste app):'
+      : 'Os outros apps usam outro PIN. Digite esse PIN para usar um só em todos (Cancelar mantém o PIN deste app):';
+    for (let tries = 0; tries < 5; tries++) {
+      const pin = await window.askSecret(label, false, text, false, true);
+      if (!pin) return null;
+      try { return { pin, status: await vault.linkWithIdentityPin(pin) }; }
+      catch (error) { if (error.name !== 'OperationError') throw error; label = text ? 'Senha incorreta. Tente de novo:' : 'PIN incorreto. Tente de novo:'; }
+    }
+    return null;
+  }
+  window.lockVault = async () => {
+    if (locking) return;
+    locking = true; root.classList.add('vault-locked'); session.set(MANUAL_LOCK); dropSession();
+    const message = document.createElement('section'); message.id = 'vaultGate'; message.className = 'vault-busy';
+    message.innerHTML = '<div class="vault-badge">' + icon('lock', 22) + '</div><p>Salvando e bloqueando…</p>' + (VERSION ? '<small class="vault-version">' + VERSION + '</small>' : '');
+    document.body.append(message);
+    // Bloqueou: some também a chave que cifra a sessão da aba (uma nova é criada ao abrir de novo).
+    try { await vault.lock(); await window.stkLocal.fila(); location.reload(); } // edição Android: espera o SQLite gravar
+    catch (_) {
+      message.replaceChildren();
+      const badge = document.createElement('div'); badge.className = 'vault-badge vault-badge-danger'; badge.innerHTML = icon('alert', 22);
+      const text = document.createElement('p'); text.textContent = 'Falha ao salvar. Os dados continuam nesta sessão. Tente novamente antes de fechar.';
+      const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'vault-primary'; retry.textContent = 'Tentar salvar e bloquear';
+      retry.onclick = () => { message.remove(); locking = false; window.lockVault(); };
+      message.append(badge, text, retry);
+    }
+  };
+  const activity = () => {
+    if (!vault.key || locking) return;
+    if (Date.now() - lastActivity >= autoLockMs()) { window.lockVault(); return; }
+    lastActivity = Date.now(); saveSession();
+  };
+  ['pointerdown', 'keydown', 'touchstart'].forEach(name => window.addEventListener(name, activity, { passive: true }));
+  const autoLockMs = () => vault.settings.autoLockMinutes * 60 * 1000;
+  setInterval(() => { if (vault.key && !locking && Date.now() - lastActivity >= autoLockMs()) window.lockVault(); }, 5000);
+  // Ao esconder só marca o momento (recarregar também esconde a página); ao voltar para a aba, bloqueia.
+  document.addEventListener('visibilitychange', () => {
+    if (!vault.key || locking || !vault.settings.lockOnHide) return;
+    if (document.visibilityState === 'hidden') saveSession({ hiddenAt: Date.now() });
+    else window.lockVault();
+  });
+  window.addEventListener('focus', activity);
+  window.addEventListener('beforeunload', event => { if (vault.dirty || vault.pending) { event.preventDefault(); event.returnValue = ''; } });
+  window.addEventListener('pagehide', () => { vault.forget(); if (releaseTab) releaseTab(); });
+  window.addEventListener('pageshow', event => { if (event.persisted) window.stkRecarregar(); });
+  window.addEventListener('storage', event => { if (event.key === vault.storageKey && vault.key) window.lockVault(); });
+  // PINs are collected in a masked, numeric field. Legacy secrets remain readable during migration.
+  // strong: senha longa para arquivos exportados (texto livre, mínimo de caracteres, com confirmação).
+  // typed: segredo de abrir os apps (PIN ou a senha que o substitui) — só digitado. Senhas de arquivos antigos podem ser coladas.
+  window.askSecret = (label, create = false, legacy = false, strong = false, typed = false) => new Promise(resolve => {
+    if (strong) { create = true; legacy = true; }
+    const dialog = document.createElement('dialog'); dialog.className = 'vault-dialog';
+    const form = noAutofill(document.createElement('form')); form.method = 'dialog';
+    const head = document.createElement('div'); head.className = 'vault-dialog-head'; head.innerHTML = '<span class="vault-badge">' + icon(create ? 'shield' : 'lock', 18) + '</span>';
+    const title = document.createElement('p'); title.textContent = label; head.append(title);
+    const input = noAutofill(document.createElement('input')); input.type = 'password'; input.required = true; input.setAttribute('aria-label', label);
+    const confirm = noAutofill(document.createElement('input')); confirm.type = 'password'; confirm.placeholder = strong ? 'Repita a senha' : 'Repita o PIN';
+    if (strong) { input.placeholder = 'Mínimo de ' + FinancVault.PASSPHRASE_MIN + ' caracteres'; input.minLength = FinancVault.PASSPHRASE_MIN; } confirm.required = create; confirm.hidden = !create; confirm.setAttribute('aria-label', 'Repita o PIN');
+    if (!legacy) for (const field of [input, confirm]) { field.className = 'vault-pin'; field.inputMode = 'numeric'; field.pattern = '[0-9]{6}'; field.minLength = 6; field.maxLength = 6; field.placeholder = '••••••'; }
+    const typedField = !legacy || typed;
+    if (typedField) for (const field of [input, confirm]) typedOnly(field, !legacy);
+    const actions = document.createElement('div'); actions.className = 'vault-dialog-actions';
+    const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Cancelar'; cancel.onclick = () => dialog.close();
+    const submit = document.createElement('button'); submit.textContent = 'Confirmar';
+    actions.append(cancel, submit);
+    let result = null;
+    form.onsubmit = event => { if (typedField && (!wasTyped(input) || (create && !wasTyped(confirm)))) { event.preventDefault(); const bad = wasTyped(input) ? confirm : input; bad.value = ''; bad._typed = ''; bad.setCustomValidity(legacy ? 'Digite a senha.' : 'Digite o PIN.'); bad.reportValidity(); return; } if (strong && !FinancVault.passphraseOK(input.value)) { event.preventDefault(); input.setCustomValidity('Use pelo menos ' + FinancVault.PASSPHRASE_MIN + ' caracteres. Uma frase fácil de lembrar funciona bem.'); input.reportValidity(); return; } if (!legacy && !FinancVault.pinOK(input.value)) { event.preventDefault(); input.setCustomValidity('Digite exatamente 6 números.'); input.reportValidity(); return; } if (create && input.value !== confirm.value) { event.preventDefault(); confirm.setCustomValidity('Os PINs não coincidem.'); confirm.reportValidity(); return; } result = input.value; };
+    input.oninput = () => input.setCustomValidity('');
+    confirm.oninput = () => confirm.setCustomValidity('');
+    dialog.onclose = () => { input.value = ''; confirm.value = ''; dialog.remove(); resolve(result); };
+    form.append(head, input, confirm, actions); dialog.append(form); document.body.append(dialog); dialog.showModal(); input.focus();
+  });
+  /* ───────── Seus dados: proteção contra limpeza, backup, restaurar, mudar de celular ───────── */
+  // Pede ao navegador para não apagar os dados sozinho (Chrome concede a apps instalados ou muito usados).
+  let persisted = null, storageInfo = null;
+  async function ensurePersisted() {
+    try {
+      if (!navigator.storage || !navigator.storage.persist) { persisted = 'indisponivel'; return; }
+      persisted = (await navigator.storage.persisted()) || (await navigator.storage.persist()) ? 'sim' : 'nao';
+    } catch (_) { persisted = 'indisponivel'; }
+    refreshStorageInfo();
+  }
+  addEventListener('appinstalled', () => { ensurePersisted(); });
+  async function refreshStorageInfo() {
+    try { if (navigator.storage && navigator.storage.estimate) storageInfo = await navigator.storage.estimate(); } catch (_) {}
+    if (window.FinancSettings) window.FinancSettings.refresh();
+  }
+  const mb = bytes => (bytes / 1048576).toLocaleString('pt-BR', { maximumFractionDigits: bytes < 10485760 ? 1 : 0 }) + ' MB';
+  const kb = bytes => Math.max(1, Math.round(bytes / 1024)).toLocaleString('pt-BR') + ' KB';
+  const dateBR = ms => new Date(ms).toLocaleDateString('pt-BR');
+  const fileDate = () => new Date().toISOString().slice(0, 10);
+  const slug = text => text.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || appId;
+  // Entrega um arquivo: no celular, a lista de compartilhar do sistema (Google Drive, Arquivos, WhatsApp para si mesmo);
+  // em qualquer lugar, baixar. O Chrome só compartilha alguns tipos (.json não, .txt sim): por isso o arquivo é .txt.
+  // Devolve 'shared', 'downloaded' ou null (fechou sem salvar).
+  function deliverFile(text, baseName, title, help) {
+    const name = baseName + '.txt';
+    const file = typeof File === 'function' ? new File([text], name, { type: 'text/plain' }) : null;
+    const canShare = Boolean(file && navigator.canShare && navigator.share && (() => { try { return navigator.canShare({ files: [file] }); } catch (_) { return false; } })());
+    return dialogBox((dialog, close) => {
+      dialog.innerHTML = '<div class="vault-dialog-head"><span class="vault-badge">' + icon('shield-check', 18) + '</span><p><b></b></p></div><p class="vault-dim"></p><p class="vault-file-name"></p>'
+        + '<p class="vault-dialog-msg" role="alert"></p><div class="vault-dialog-actions vault-dialog-stack">'
+        + (canShare ? '<button type="button" data-a="share" class="vault-dialog-primary">' + icon('share-2', 16) + 'Salvar no Drive, Arquivos…</button>' : '')
+        + '<button type="button" data-a="download"' + (canShare ? '' : ' class="vault-dialog-primary"') + '>' + icon('download', 16) + 'Baixar arquivo</button>'
+        + '<button type="button" data-a="no">Fechar</button></div>';
+      dialog.querySelector('b').textContent = title;
+      dialog.querySelector('.vault-dim').textContent = help;
+      dialog.querySelector('.vault-file-name').textContent = name;
+      const msg = dialog.querySelector('.vault-dialog-msg');
+      const shareBtn = dialog.querySelector('[data-a=share]');
+      if (shareBtn) shareBtn.onclick = async () => {
+        try { await navigator.share({ files: [file], title: name }); close('shared'); }
+        catch (error) { if (error.name !== 'AbortError') msg.textContent = 'Não deu para compartilhar (' + error.message + '). Use "Baixar arquivo".'; }
+      };
+      dialog.querySelector('[data-a=download]').onclick = () => {
+        window.stkSalvarArquivo(new Blob([text], { type: 'text/plain' }), name); // edição Android
+        close('downloaded');
+      };
+      dialog.querySelector('[data-a=no]').onclick = () => close(null);
+    });
+  }
+  const COPY_HELP = 'Guarde fora deste aparelho (Google Drive, computador). O arquivo é cifrado: abre só com as suas 12 palavras.';
+  // Cópia de segurança deste app (todos os dados do cofre). true se o arquivo foi salvo.
+  async function backupNow() {
+    if (!vault.hasSeed) throw new Error('A cópia usa as 12 palavras. Em Configurações, toque em "Usar o PIN único" (ou bloqueie e abra de novo) e tente outra vez.');
+    const payload = await vault.exportCopy();
+    const out = await deliverFile(JSON.stringify(payload), slug(appName) + '-copia-' + fileDate(), 'Cópia de segurança pronta', COPY_HELP);
+    if (out) { await vault.markBackup(); return true; }
+    return false;
+  }
+  // Abre um arquivo de cópia escolhido pela pessoa (deste app ou de todos os apps), pedindo as 12 palavras se for de outro aparelho.
+  function pickFile() {
+    return new Promise(resolve => {
+      const input = document.createElement('input'); input.type = 'file'; input.accept = '.txt,.json,text/plain,application/json';
+      input.onchange = async () => { const f = input.files && input.files[0]; resolve(f ? await f.text() : null); };
+      input.oncancel = () => resolve(null);
+      input.click();
+    });
+  }
+  async function openCopyFile() {
+    const text = await pickFile();
+    if (!text) return null;
+    let payload; try { payload = JSON.parse(text); } catch (_) { throw new Error('Este arquivo não é uma cópia de segurança.'); }
+    if (payload && payload.format === FinancVault.seed.BACKUP_FORMAT && /:backup$/.test(payload.context || '')) throw new Error('Este arquivo é um backup do próprio app: abra pela importação do ' + appName + '.');
+    try { return await vault.openCopy(payload); }
+    catch (error) { if (error.code !== 'SEED_REQUIRED') throw error; }
+    let label = 'Esta cópia foi feita com outras 12 palavras. Digite essas palavras ou o código de 12 caracteres:';
+    for (let tries = 0; tries < 5; tries++) {
+      const words = await askSeed(label);
+      if (!words) return null;
+      try { return await vault.openCopy(payload, words); }
+      catch (error) { if (error.code !== 'SEED_INVALID' && error.name !== 'OperationError') throw error; label = error.code === 'SEED_INVALID' ? error.message : 'Essas palavras não abrem esta cópia. Tente de novo:'; }
+    }
+    return null;
+  }
+  const describeCopy = copy => copy.format === FinancVault.ALL_FORMAT
+    ? 'Cópia de todos os apps (' + Object.keys(copy.apps).length + ': ' + Object.keys(copy.apps).join(', ') + ') feita em ' + dateBR(copy.at) + '.'
+    : 'Cópia do ' + appName + ' feita em ' + dateBR(copy.at) + ', com ' + Object.keys(copy.values).length + ' registros.';
+  async function restoreFlow() {
+    const copy = await openCopyFile();
+    if (!copy) return null;
+    const all = copy.format === FinancVault.ALL_FORMAT;
+    const ok = await confirmDanger(all ? 'Restaurar todos os apps?' : 'Restaurar esta cópia?',
+      describeCopy(copy) + (all ? ' Os dados dos apps da cópia neste aparelho serão substituídos. Feche os outros apps abertos antes.' : ' Os dados atuais deste app serão substituídos.') + ' Não pode ser desfeito.',
+      'Restaurar');
+    if (!ok) return null;
+    if (all) await vault.restoreAll(copy); else await vault.restoreValues(copy.values);
+    locking = true; saveSession(); window.stkRecarregar();
+    return 'Restaurado.';
+  }
+  async function checkFlow() {
+    const copy = await openCopyFile();
+    if (!copy) return null;
+    return 'Esta cópia abre: ' + describeCopy(copy) + ' Nada foi alterado.';
+  }
+  async function movePhoneFlow() {
+    if (!vault.hasSeed) throw new Error('A cópia usa as 12 palavras. Ligue este app ao PIN único e tente de novo.');
+    const out = await vault.exportAll();
+    const help = 'No celular novo: abra qualquer app, crie o PIN, vá em Configurações → Seus dados → Restaurar cópia de segurança, escolha este arquivo e digite as 12 palavras DESTE aparelho.'
+      + (out.skipped.length ? ' Ficaram de fora (ainda com PIN próprio): ' + out.skipped.join(', ') + '.' : '');
+    const saved = await deliverFile(JSON.stringify(out.payload), 'financ-todos-os-apps-' + fileDate(), 'Cópia de todos os apps pronta (' + out.apps.length + ')', help);
+    if (saved) { await vault.markBackup(); return 'Cópia de ' + out.apps.length + ' apps salva. Siga os passos no celular novo.'; }
+    return null;
+  }
+  // Lembrete discreto ao abrir: só com mudança desde o último backup e prazo vencido.
+  function remindBackup() {
+    if (!vault.key || locking || document.getElementById('vaultBackupNudge')) return;
+    let st; try { st = vault.backupStatus(); } catch (_) { return; }
+    if (!st.due || !vault.hasSeed) return;
+    const box = document.createElement('aside'); box.id = 'vaultBackupNudge'; box.setAttribute('role', 'status');
+    box.innerHTML = '<span class="vbn-ic">' + icon('shield-check', 18) + '</span><p></p><div class="vbn-actions"><button type="button" data-a="now" class="vbn-primary">Fazer backup</button><button type="button" data-a="later">Depois</button></div>';
+    box.querySelector('p').textContent = st.backupAt ? 'Seu último backup foi há ' + st.ageDays + ' dias e houve mudanças desde então.' : 'Você ainda não fez uma cópia de segurança dos dados deste app.';
+    box.querySelector('[data-a=now]').onclick = async () => { box.remove(); try { await backupNow(); } catch (error) { status.textContent = error.message; setTimeout(() => { status.textContent = ''; }, 6000); } };
+    box.querySelector('[data-a=later]').onclick = async () => { box.remove(); try { await vault.snoozeBackup(3); } catch (_) {} };
+    document.body.append(box);
+  }
+  window.FinancBackup = Object.freeze({ now: backupNow, restore: restoreFlow, check: checkFlow, movePhone: movePhoneFlow, status: () => vault.key ? vault.backupStatus() : null });
+
+  /* ───────── Menu do app: botão de 3 pontos que abre um painel lateral à esquerda ───────── */
+  function avatarMarkup(size) {
+    if (logoLink) return '<img src="' + esc(logoLink.getAttribute('href')) + '" alt="" width="' + size + '" height="' + size + '">';
+    const initials = appName.split(/[\s-]+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+    return '<span class="vp-initials">' + esc(initials || '?') + '</span>';
+  }
+  function mountProfile() {
+    const button = document.createElement('button'); button.id = 'vaultProfileBtn'; button.type = 'button';
+    button.setAttribute('aria-haspopup', 'dialog'); button.setAttribute('aria-expanded', 'false');
+    button.setAttribute('aria-label', 'Abrir menu'); button.title = 'Menu';
+    button.innerHTML = icon('more-vertical', 20);
+    button.onclick = () => openProfile(button);
+    // Botão de 3 pontos ao lado do título do app (.app-head); o painel abre pela esquerda.
+    // O app indica o lugar com data-vault-profile-slot. Com várias telas, cada cabeçalho tem o seu
+    // e o botão vai para o da tela visível. Sem nenhum, entra no início da página.
+    const slots = document.querySelectorAll('[data-vault-profile-slot]');
+    if (!slots.length) { document.body.prepend(button); return; }
+    const place = () => {
+      const target = Array.from(slots).find(s => s.parentElement && s.parentElement.getClientRects().length) || slots[0];
+      if (button.parentElement !== target) target.append(button);
+    };
+    place();
+    if (slots.length > 1) new MutationObserver(place).observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class', 'hidden', 'style'] });
+  }
+  function openProfile(trigger) {
+    if (!vault.key || document.getElementById('vaultProfile')) return;
+    const cfg = vault.settings, bioOn = Boolean(vault.biometric);
+    const drawer = document.createElement('dialog'); drawer.id = 'vaultProfile'; drawer.className = 'vp-drawer';
+    drawer.setAttribute('aria-labelledby', 'vpTitle');
+    const item = (id, ic, label, desc, cls = '') => '<button type="button" class="vp-item ' + cls + '" data-vp="' + id + '"><span class="vp-item-ic">' + icon(ic, 18) + '</span><span class="vp-item-text"><b>' + esc(label) + '</b>' + (desc ? '<span>' + esc(desc) + '</span>' : '') + '</span>' + (cls.includes('vp-lock') ? '' : icon('chevron-right', 16)) + '</button>';
+    let extra = '';
+    extraSections.forEach((sec, si) => {
+      extra += '<p class="vp-section">' + esc(sec.title) + '</p>' + sec.rows.map((r, ri) => item('x' + si + '-' + ri, r.icon || 'chevron-right', r.label, r.description || '', r.danger ? 'vp-danger' : '')).join('');
+    });
+    drawer.innerHTML = '<div class="vp-panel">'
+      + '<header class="vp-head"><button type="button" class="vp-close" data-vp="close" aria-label="Fechar menu">' + icon('x', 20) + '</button>'
+      + '<span class="vp-avatar vp-avatar-lg">' + avatarMarkup(56) + '</span>'
+      + '<h2 id="vpTitle"></h2><p class="vp-sub">' + icon('shield-check', 13) + 'Cofre local protegido</p></header>'
+      + '<div class="vp-stats">'
+      + '<div><span>' + icon('clock', 14) + 'Bloqueio automático</span><b>' + cfg.autoLockMinutes + ' min</b></div>'
+      + '<div><span>' + icon('fingerprint', 14) + 'Biometria</span><b>' + (bioOn ? 'Ativada' : 'Desativada') + '</b></div>'
+      + '</div>'
+      + '<nav class="vp-menu" aria-label="Menu do perfil">'
+      + '<p class="vp-section">Conta</p>'
+      + item('settings', 'settings', 'Configurações', 'PIN, biometria e bloqueio')
+      + extra
+      + '</nav>'
+      + '<footer class="vp-foot">' + item('lock', 'lock', 'Bloquear agora', 'Salva e pede o PIN para voltar', 'vp-lock')
+      + '<p class="vp-version"></p></footer></div>';
+    drawer.querySelector('#vpTitle').textContent = appName;
+    drawer.querySelector('.vp-version').textContent = appName + (VERSION ? ' ' + VERSION : '') + ' · Kit de segurança';
+    const close = () => { drawer.classList.add('vp-closing'); setTimeout(() => drawer.close(), reducedMotion() ? 0 : 180); };
+    drawer.addEventListener('cancel', event => { event.preventDefault(); close(); });
+    drawer.addEventListener('click', event => {
+      if (event.target === drawer) { close(); return; }
+      const target = event.target.closest('[data-vp]'); if (!target) return;
+      const action = target.dataset.vp;
+      if (action === 'close') close();
+      else if (action === 'settings') { drawer.close(); FinancSettings.open(); }
+      else if (action === 'lock') { drawer.close(); window.lockVault(); }
+      else if (action[0] === 'x') {
+        const [si, ri] = action.slice(1).split('-').map(Number);
+        drawer.close(); extraSections[si].rows[ri].onClick();
+      }
+    });
+    drawer.onclose = () => { drawer.remove(); if (trigger) trigger.setAttribute('aria-expanded', 'false'); if (trigger && document.body.contains(trigger)) trigger.focus({ preventScroll: true }); };
+    document.body.append(drawer); drawer.showModal(); if (trigger) trigger.setAttribute('aria-expanded', 'true');
+    drawer.querySelector('.vp-close').focus();
+  }
+  const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ───────── Configurações (aba ou tela cheia) ───────── */
+  const extraSections = [], groups = [];
+  let mounted = null, handling = false;
+  // Operações que conferem o PIN dentro do app usam o mesmo contador gravado da tela de desbloqueio.
+  async function withPin(label, action) {
+    const gs = guard.state();
+    if (gs.locked) throw new Error('O PIN está bloqueado por tentativas erradas. Bloqueie o app e use "Esqueci o PIN" (12 palavras) ou a biometria.');
+    if (gs.waitMs > 0) throw new Error('Muitas tentativas. Aguarde ' + Math.ceil(gs.waitMs / 1000) + 's.');
+    const text = vault.secretKind === 'password';
+    const pin = await window.askSecret(text ? label.replace(/\bseu PIN\b/, 'sua senha').replace(/\bo PIN\b/, 'a senha') : label, false, text, false, true);
+    if (!pin) return null;
+    try { const result = await action(pin); guard.reset(); return result ?? true; }
+    catch (error) {
+      if (error.name === 'OperationError') {
+        const st = guard.fail();
+        throw new Error((vault.secretKind === 'password' ? 'Senha incorreta.' : 'PIN incorreto.') + (st.locked ? ' O PIN foi bloqueado.' : st.left <= 5 ? ' Restam ' + st.left + ' tentativas.' : ''));
+      }
+      throw error;
+    }
+  }
+  function dialogBox(build) {
+    return new Promise(resolve => {
+      const dialog = document.createElement('dialog'); dialog.className = 'vault-dialog';
+      let result = false;
+      const close = value => { result = value; dialog.close(); };
+      build(dialog, close);
+      dialog.onclose = () => { dialog.remove(); resolve(result); };
+      document.body.append(dialog); dialog.showModal();
+    });
+  }
+  function confirmDanger(title, text, action) {
+    return dialogBox((dialog, close) => {
+      dialog.innerHTML = '<div class="vault-dialog-head"><span class="vault-badge vault-badge-danger">' + icon('alert', 18) + '</span><p><b></b></p></div><p class="vault-dim"></p><div class="vault-dialog-actions"><button type="button" data-a="no">Cancelar</button><button type="button" data-a="yes" class="vault-dialog-danger"></button></div>';
+      dialog.querySelector('b').textContent = title; dialog.querySelector('.vault-dim').textContent = text;
+      dialog.querySelector('[data-a=yes]').textContent = action;
+      dialog.querySelector('[data-a=no]').onclick = () => close(false);
+      dialog.querySelector('[data-a=yes]').onclick = () => close(true);
+    });
+  }
+  function showCodeDialog(code) {
+    return dialogBox((dialog, close) => {
+      dialog.innerHTML = '<div class="vault-dialog-head"><span class="vault-badge">' + icon('key', 18) + '</span><p><b>Novo código de recuperação</b></p></div><p class="vault-dim">O código anterior deixou de funcionar. Guarde este offline; ele não será exibido novamente.</p><p class="vault-code"></p><div class="vault-dialog-actions"><button type="button" data-a="copy">' + icon('copy', 16) + 'Copiar</button><button type="button" data-a="ok" class="vault-dialog-primary">Guardei</button></div>';
+      const box = dialog.querySelector('.vault-code'); box.textContent = code;
+      const copy = dialog.querySelector('[data-a=copy]');
+      copy.onclick = async () => { try { await navigator.clipboard.writeText(code); copy.innerHTML = icon('check', 16) + 'Copiado'; } catch (_) { getSelection().selectAllChildren(box); } };
+      dialog.querySelector('[data-a=ok]').onclick = () => close(true);
+      dialog.oncancel = event => event.preventDefault();
+    });
+  }
+  function showSeedDialog(seed, title) {
+    return dialogBox((dialog, close) => {
+      dialog.innerHTML = '<div class="vault-dialog-head"><span class="vault-badge">' + icon('key', 18) + '</span><p><b></b></p></div><p class="vault-dim"></p>' + seedMarkup(seed)
+        + '<div class="vault-dialog-actions"><button type="button" data-a="pdf">' + icon('download', 16) + 'Baixar PDF</button><button type="button" data-a="ok" class="vault-dialog-primary">Fechar</button></div>';
+      dialog.querySelector('b').textContent = title; dialog.querySelector('.vault-dim').textContent = SEED_HELP;
+      dialog.querySelector('[data-a=pdf]').onclick = () => downloadSeedPdf(seed);
+      dialog.querySelector('[data-a=ok]').onclick = () => close(true);
+    });
+  }
+  // Pede as 12 palavras (ou o código) de outro backup, em texto visível.
+  function askSeed(label) {
+    return dialogBox((dialog, close) => {
+      dialog.innerHTML = '<form method="dialog"><div class="vault-dialog-head"><span class="vault-badge">' + icon('key', 18) + '</span><p></p></div><textarea rows="3" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="12 palavras ou XXXX-XXXX-XXXX"></textarea><div class="vault-dialog-actions"><button type="button" data-a="no">Cancelar</button><button>Abrir backup</button></div></form>';
+      dialog.querySelector('p').textContent = label;
+      const area = noAutofill(dialog.querySelector('textarea'));
+      dialog.querySelector('[data-a=no]').onclick = () => close(null);
+      dialog.querySelector('form').onsubmit = event => { event.preventDefault(); close(area.value.trim() || null); };
+      setTimeout(() => area.focus(), 0);
+    });
+  }
+  const esc = value => String(value).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const row = (ic, label, desc, control = '', attrs = '') => '<div class="fs-row"' + attrs + '><span class="fs-ic">' + icon(ic, 18) + '</span><div class="fs-text"><b>' + esc(label) + '</b>' + (desc ? '<span>' + esc(desc) + '</span>' : '') + '</div>' + control + '</div>';
+  const actionRow = (id, ic, label, desc, cls = '') => '<button type="button" class="fs-row fs-action ' + cls + '" data-fs="' + id + '"><span class="fs-ic">' + icon(ic, 18) + '</span><span class="fs-text"><b>' + esc(label) + '</b>' + (desc ? '<span>' + esc(desc) + '</span>' : '') + '</span>' + icon('chevron-right', 16) + '</button>';
+  const toggle = (id, on, disabled) => '<button type="button" role="switch" class="fs-switch" data-fs="' + id + '" aria-checked="' + on + '"' + (disabled ? ' disabled' : '') + '><span></span></button>';
+  const badge = b => b ? '<span class="fs-badge fs-badge-' + esc(b.tone || 'neutral') + '">' + esc(b.text) + '</span>' : '';
+  // Linha de um grupo do kit (ex.: Salvar no celular): chave liga/desliga, ação ou só informação, com badge de status opcional.
+  const groupRow = (gi, r) => {
+    const id = 'g' + gi + '-' + r.id;
+    if (typeof r.toggle === 'boolean') return row(r.icon, r.label, r.description, badge(r.badge) + toggle(id, r.toggle, r.disabled));
+    if (r.onClick) return actionRow(id, r.icon, r.label, r.description, r.danger ? 'fs-danger' : r.accent ? 'fs-accent' : '');
+    return row(r.icon, r.label, r.description, badge(r.badge));
+  };
+  const group = (title, body) => '<section class="fs-group"><h3 class="fs-title">' + esc(title) + '</h3><div class="fs-list">' + body + '</div></section>';
+
+  function dataRows() {
+    const st = vault.backupStatus(), use = vault.usage;
+    const outside = FinancVault.OUTSIDE_DATA.includes(appId);
+    const used = storageInfo && storageInfo.usage ? ' · navegador: ' + mb(storageInfo.usage) + (storageInfo.quota ? ' de ' + mb(storageInfo.quota) : '') : '';
+    const full = storageInfo && storageInfo.quota && storageInfo.usage / storageInfo.quota >= 0.7;
+    const prot = persisted === 'sim' ? ['Ligada: o navegador não apaga os dados sozinho.', { text: 'ligada', tone: 'pos' }]
+      : persisted === 'nao' ? ['Não garantida: em pouco espaço, o navegador pode apagar dados. Instale o app na tela inicial para proteger.', { text: 'não garantida', tone: 'warn' }]
+      : ['Este navegador não informa.', null];
+    const last = st.backupAt ? 'Há ' + st.ageDays + ' dia' + (st.ageDays === 1 ? '' : 's') + ' (' + dateBR(st.backupAt) + ')' + (st.changed ? ', com mudanças depois.' : ', sem mudanças depois.') : 'Nenhuma cópia ainda.';
+    return row('database', 'Espaço usado', kb(use.appBytes) + ' deste app' + (use.inIndexedDB ? ' (IndexedDB)' : '') + used + (full ? '. Quase cheio: faça uma cópia e apague registros antigos.' : '.'), badge(full ? { text: 'quase cheio', tone: 'warn' } : null))
+      + row('shield-check', 'Proteção contra limpeza', prot[0], badge(prot[1]))
+      + (persisted === 'nao' ? actionRow('persist', 'shield', 'Pedir proteção ao navegador', 'Tenta de novo. Apps instalados costumam ganhar a proteção.') : '')
+      + (outside ? row('info', 'Cópia de segurança', 'Os dados do ' + appName + ' ficam no armazenamento próprio dele: use o backup do próprio app.') : '')
+      + (outside ? '' : row('history', 'Última cópia de segurança', last, badge(st.due ? { text: 'pendente', tone: 'warn' } : null))
+      + actionRow('backup-now', 'download', 'Fazer cópia de segurança agora', 'Um arquivo com todos os dados deste app, cifrado pelas 12 palavras.', 'fs-accent')
+      + row('bell', 'Lembrete de cópia', 'Avisa ao abrir quando houver mudanças sem cópia.', '<select class="fs-select" data-fs="backup-days" aria-label="Lembrete de cópia">' + FinancVault.BACKUP_DAYS.map(d => '<option value="' + d + '"' + (d === st.days ? ' selected' : '') + '>' + (d ? d + ' dias' : 'desligado') + '</option>').join('') + '</select>')
+      + actionRow('restore', 'upload', 'Restaurar cópia de segurança', 'Troca os dados deste app (ou de todos) pelos de uma cópia.')
+      + actionRow('check-copy', 'check', 'Conferir uma cópia', 'Abre o arquivo sem mudar nada e diz de quando é.')
+      + actionRow('move-phone', 'smartphone', 'Mudar de celular', 'Uma cópia de todos os apps deste aparelho para levar ao novo.'));
+  }
+  function renderSettings(container) {
+    if (!vault.key) return;
+    const cfg = vault.settings, bioOn = Boolean(vault.biometric);
+    let html = group('Segurança',
+      (vault.linked ? '' : actionRow('link', 'link', 'Usar o PIN único', 'Um só PIN, código e biometria para todos os apps.'))
+      + actionRow('pin', 'key', vault.secretKind === 'password' ? 'Alterar senha' : 'Alterar PIN', vault.linked ? 'Vale para todos os apps deste aparelho.' : 'Pede o PIN atual e o novo PIN.')
+      + (!vault.linked ? '' : vault.secretKind === 'password'
+        ? actionRow('secret-kind', 'key', 'Voltar a usar PIN', 'Troca a senha por um PIN de 6 números em todos os apps.')
+        : actionRow('secret-kind', 'shield', 'Usar senha em vez de PIN', 'Mais forte: 10+ caracteres, pode ser uma frase. Vale para todos os apps.'))
+      + row('fingerprint', 'Biometria', bioOn ? 'Ativada: digital, rosto ou bloqueio de tela.' : bioAvailable ? 'Desativada.' : 'Indisponível neste aparelho ou navegador.', toggle('bio', bioOn, !bioOn && !bioAvailable))
+      + row('clock', 'Bloqueio automático', 'Sem uso por este tempo, o app bloqueia.', '<select class="fs-select" data-fs="autolock" aria-label="Bloqueio automático">' + FinancVault.AUTO_LOCK_MINUTES.map(m => '<option value="' + m + '"' + (m === cfg.autoLockMinutes ? ' selected' : '') + '>' + m + ' min</option>').join('') + '</select>')
+      + row('eye-off', 'Bloquear ao sair do app', 'Bloqueia ao trocar de aba, minimizar ou apagar a tela.', toggle('hide', cfg.lockOnHide))
+      + (vault.linked ? actionRow('seed-show', 'key', 'Ver minhas 12 palavras', 'Mostra as palavras e o código de 12 caracteres e baixa o PDF. Pede o PIN.')
+        + actionRow('recovery', 'shield-check', 'Gerar novas 12 palavras', 'As atuais deixam de recuperar o PIN. Backups feitos com elas continuam precisando delas.')
+        : actionRow('recovery', 'shield-check', 'Novo código de recuperação', 'Gera outro código e invalida o anterior.'))
+      + actionRow('lock', 'lock', 'Bloquear agora', '', 'fs-accent'));
+    groups.forEach((g, gi) => { g.current = g.rows() || []; if (g.current.length) html += group(g.title, g.current.map(r => groupRow(gi, r)).join('')); });
+    html += group('Seus dados', dataRows());
+    if (installPrompt) html += group('App', actionRow('install', 'download', 'Instalar app', 'Coloca o ' + appName + ' na tela inicial, como um app.'));
+    extraSections.forEach((sec, si) => { html += group(sec.title, sec.rows.map((r, ri) => actionRow('x' + si + '-' + ri, r.icon || 'chevron-right', r.label, r.description || '', r.danger ? 'fs-danger' : '')).join('')); });
+    html += group('Sobre', row('info', appName + (VERSION ? ' ' + VERSION : ''), 'Kit de segurança 2.1 · PIN único, biometria, bloqueio automático e dados cifrados (AES-256-GCM) neste aparelho.'));
+    html += group('Zona de perigo', actionRow('destroy', 'trash', 'Apagar todos os dados deste app', 'Remove o cofre deste app. O PIN continua valendo nos outros apps. Não pode ser desfeito.', 'fs-danger'));
+    mounted = container;
+    container.innerHTML = '<div class="fs">' + html + '<p class="fs-toast" role="status" aria-live="polite"></p></div>';
+    container.onclick = event => handle(event, container);
+    container.onchange = event => handle(event, container);
+  }
+  async function handle(event, container) {
+    const el = event.target.closest('[data-fs]');
+    if (!el || el.disabled || !container.contains(el)) return;
+    const kind = el.dataset.fs;
+    const isSelect = kind === 'autolock' || kind === 'backup-days';
+    if (isSelect && event.type !== 'change') return;
+    if (!isSelect && event.type === 'change') return;
+    const toast = container.querySelector('.fs-toast');
+    const say = (text, bad) => { toast.textContent = text; toast.classList.toggle('fs-bad', Boolean(bad)); };
+    say('');
+    el.disabled = true; handling = true;
+    try {
+      if (kind[0] === 'g') {
+        const [gi, rid] = [Number(kind.slice(1, kind.indexOf('-'))), kind.slice(kind.indexOf('-') + 1)];
+        const target = groups[gi] && (groups[gi].current || []).find(r => r.id === rid);
+        if (target && target.onClick) { const message = await target.onClick(); if (message) say(message); }
+      } else if (kind === 'pin') {
+        const text = vault.secretKind === 'password';
+        const changed = await withPin('Digite o PIN atual:', async current => {
+          await vault.verifyPin(current);
+          const next = text ? await window.askSecret('Crie a nova senha (mínimo de ' + FinancVault.PASSPHRASE_MIN + ' caracteres; pode ser uma frase):', true, true, true, true)
+            : await window.askSecret('Crie o novo PIN de 6 números:', true);
+          if (!next) return false;
+          if (next === current) throw new Error(text ? 'A nova senha precisa ser diferente da atual.' : 'O novo PIN precisa ser diferente do atual.');
+          await vault.changePin(current, next); return true;
+        });
+        if (changed) say(text ? 'Senha alterada em todos os apps.' : 'PIN alterado.');
+      } else if (kind === 'secret-kind') {
+        const toPin = vault.secretKind === 'password';
+        const changed = await withPin('Digite o PIN atual:', async current => {
+          await vault.verifyPin(current);
+          const next = toPin ? await window.askSecret('Crie o PIN de 6 números:', true)
+            : await window.askSecret('Crie a senha (mínimo de ' + FinancVault.PASSPHRASE_MIN + ' caracteres; pode ser uma frase fácil de lembrar):', true, true, true, true);
+          if (!next) return false;
+          await vault.changeSecretKind(current, next, toPin ? 'pin' : 'password'); return true;
+        });
+        if (changed) say(toPin ? 'Pronto: todos os apps voltam a abrir com PIN.' : 'Pronto: todos os apps passam a abrir com a senha.');
+      } else if (kind === 'bio') {
+        if (vault.biometric) {
+          const { credentialId } = vault.biometric;
+          await vault.disableBiometric(); bio.forget(credentialId);
+          try { nativeStorage.setItem(DECLINED, '1'); } catch (_) {}
+          say(vault.linked ? 'Biometria desativada em todos os apps. Use o PIN.' : 'Biometria desativada. Use o PIN para abrir.');
+        } else if (await withPin('Digite seu PIN para ativar a biometria:', pin => enrollBiometric(pin))) say('Biometria ativada.');
+      } else if (kind === 'autolock') {
+        const minutes = Number(el.value);
+        await vault.setSettings({ autoLockMinutes: minutes }); lastActivity = Date.now();
+        say('Bloqueio automático: ' + minutes + ' min.');
+      } else if (kind === 'backup-days') {
+        const days = Number(el.value);
+        await vault.setBackupDays(days);
+        say(days ? 'Lembrete de cópia: a cada ' + days + ' dias com mudanças.' : 'Lembrete de cópia desligado.');
+      } else if (kind === 'backup-now') {
+        if (await backupNow()) say('Cópia de segurança salva.');
+      } else if (kind === 'restore') {
+        const message = await restoreFlow(); if (message) say(message);
+      } else if (kind === 'check-copy') {
+        const message = await checkFlow(); if (message) say(message);
+      } else if (kind === 'move-phone') {
+        const message = await movePhoneFlow(); if (message) say(message);
+      } else if (kind === 'persist') {
+        await ensurePersisted();
+        say(persisted === 'sim' ? 'Proteção ligada.' : 'O navegador ainda não concedeu. Instale o app na tela inicial e tente de novo.', persisted !== 'sim');
+      } else if (kind === 'hide') {
+        const next = await vault.setSettings({ lockOnHide: !vault.settings.lockOnHide });
+        say(next.lockOnHide ? 'O app vai bloquear ao sair.' : 'Bloqueio ao sair desativado.');
+      } else if (kind === 'seed-show') {
+        const seed = await withPin('Digite seu PIN para ver as 12 palavras:', pin => vault.revealSeed(pin));
+        if (seed && seed.words) await showSeedDialog(seed, 'Suas 12 palavras');
+      } else if (kind === 'recovery' && vault.linked) {
+        if (!await confirmDanger('Gerar novas 12 palavras?', 'As palavras atuais deixam de recuperar o PIN. Os backups já feitos continuam abrindo só com as palavras atuais: guarde o papel antigo junto com eles.', 'Gerar novas')) { el.disabled = false; handling = false; return; }
+        const seed = await withPin('Digite seu PIN para gerar as novas palavras:', pin => vault.rotateRecovery(pin));
+        if (seed && seed.words) { await showSeedDialog(seed, 'Suas novas 12 palavras'); say('Novas 12 palavras ativas.'); }
+      } else if (kind === 'recovery') {
+        const code = await withPin('Digite seu PIN para gerar um novo código:', pin => vault.rotateRecovery(pin));
+        if (typeof code === 'string') { await showCodeDialog(code); say('Novo código de recuperação ativo.'); }
+      } else if (kind === 'lock') {
+        window.lockVault(); return;
+      } else if (kind === 'link') {
+        const pin = await window.askSecret('Digite o PIN dos outros apps:');
+        if (pin) { await vault.linkWithIdentityPin(pin); await adoptCertificate(); say('Pronto: este app agora usa o mesmo PIN dos outros.'); }
+      } else if (kind === 'install') {
+        const prompt = installPrompt; installPrompt = null;
+        if (prompt) { prompt.prompt(); const { outcome } = await prompt.userChoice; say(outcome === 'accepted' ? 'App instalado.' : 'Instalação cancelada.'); }
+      } else if (kind === 'destroy') {
+        if (!await confirmDanger('Apagar todos os dados?', 'O cofre deste app será removido deste navegador, incluindo PIN, biometria e todos os registros. Faça um backup antes, se precisar.', 'Apagar tudo')) { el.disabled = false; return; }
+        const credential = vault.linked ? null : vault.biometric; // a biometria FINANC continua valendo nos outros apps
+        const done = await withPin('Digite seu PIN para apagar tudo:', pin => vault.destroy(pin));
+        if (done) {
+          if (credential) bio.forget(credential.credentialId);
+          try { nativeStorage.removeItem(DECLINED); } catch (_) {}
+          locking = true; window.stkRecarregar(); return;
+        }
+      } else if (kind[0] === 'x') {
+        const [si, ri] = kind.slice(1).split('-').map(Number);
+        const target = extraSections[si] && extraSections[si].rows[ri];
+        if (target) { el.disabled = false; closeSheet(); await target.onClick(); return; }
+      }
+    } catch (error) { say(biometricError(error), true); }
+    handling = false;
+    const message = toast.textContent, bad = toast.classList.contains('fs-bad');
+    renderSettings(container);
+    const fresh = container.querySelector('.fs-toast'); fresh.textContent = message; fresh.classList.toggle('fs-bad', bad);
+  }
+  let sheet = null;
+  function closeSheet() { if (sheet) sheet.close(); }
+  window.FinancSettings = {
+    // Seção própria do app: { title, rows: [{ icon, label, description, danger, onClick }] }
+    addSection(section) {
+      if (!section || typeof section.title !== 'string' || !Array.isArray(section.rows)) throw new Error('Seção inválida.');
+      extraSections.push({ title: section.title, rows: section.rows.filter(r => r && typeof r.label === 'string' && typeof r.onClick === 'function') });
+    },
+    // Grupo do próprio kit, dentro de Configurações (não vai para o menu lateral). rows() é chamado a cada desenho:
+    // [{ id, icon, label, description, badge: { text, tone: pos|warn|neg|info|neutral }, toggle, disabled, accent, danger, onClick }]
+    addGroup(g) { if (g && typeof g.title === 'string' && typeof g.rows === 'function') groups.push({ title: g.title, rows: g.rows }); },
+    // Redesenha Configurações abertas (status que muda sozinho), mantendo a mensagem da tela.
+    refresh() {
+      if (!mounted || !mounted.isConnected || handling || !vault.key) return;
+      const old = mounted.querySelector('.fs-toast'), message = old ? old.textContent : '', bad = old ? old.classList.contains('fs-bad') : false;
+      renderSettings(mounted);
+      const fresh = mounted.querySelector('.fs-toast'); if (fresh) { fresh.textContent = message; fresh.classList.toggle('fs-bad', bad); }
+    },
+    mount(container) { renderSettings(container); refreshStorageInfo(); },
+    open() {
+      if (!vault.key || sheet) return;
+      sheet = document.createElement('dialog'); sheet.className = 'fs-sheet'; sheet.setAttribute('aria-labelledby', 'fsSheetTitle');
+      sheet.innerHTML = '<header class="fs-head"><button type="button" class="fs-back" aria-label="Voltar">' + icon('arrow-left', 20) + '</button><div><h2 id="fsSheetTitle">Configurações</h2><span></span></div></header><div class="fs-body"></div>';
+      sheet.querySelector('.fs-head span').textContent = appName;
+      sheet.querySelector('.fs-back').onclick = closeSheet;
+      sheet.onclose = () => { sheet.remove(); sheet = null; };
+      document.body.append(sheet); renderSettings(sheet.querySelector('.fs-body')); sheet.showModal(); refreshStorageInfo();
+    },
+  };
+  window.vaultSettings = () => window.FinancSettings.open();
+  // Backup (contexto '<app>:backup') com as 12 palavras: sem senha, abre com as palavras em qualquer aparelho.
+  // Outros arquivos (certificado, extrato) e apps ainda com PIN próprio: senha longa, como antes.
+  window.exportProtected = async (value, context, filename) => {
+    let payload;
+    if ((/:backup$/.test(context) || context === 'financ:certificate') && vault.hasSeed) payload = await vault.exportBackup(value, context);
+    else {
+      const passphrase = await window.askSecret('Crie uma senha para este arquivo (mínimo de ' + FinancVault.PASSPHRASE_MIN + ' caracteres; pode ser uma frase):', true, true, true);
+      if (!passphrase) return;
+      payload = await FinancVault.protectPassphrase(value, passphrase, context);
+    }
+    if (/:backup$/.test(context)) {
+      const saved = await deliverFile(JSON.stringify(payload), String(filename).replace(/\.(secure\.)?json$/i, ''), 'Backup pronto', COPY_HELP);
+      if (saved) { try { await vault.markBackup(); } catch (_) {} }
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(payload)], { type: 'application/json' }));
+    const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+  };
+  // Abre um backup: v2 (12 palavras; deste aparelho direto, de outras palavras pedindo-as) ou v1 (senha).
+  // Devolve os dados, ou null se a pessoa cancelar. Erro com mensagem pronta para mostrar.
+  window.importProtected = async (payload, context) => {
+    if (payload && payload.format === FinancVault.seed.BACKUP_FORMAT) {
+      if (payload.context !== context) throw new Error('Este arquivo não é um backup deste app.');
+      if (vault.hasSeed) {
+        try { return await vault.importBackup(payload, context); }
+        catch (error) { if (error.code !== 'SEED_REQUIRED') throw error; }
+      }
+      let label = 'Este backup foi feito com outras 12 palavras. Digite essas palavras ou o código de 12 caracteres:';
+      for (let tries = 0; tries < 5; tries++) {
+        const text = await askSeed(label);
+        if (!text) return null;
+        try { return await vault.importBackup(payload, context, text); }
+        catch (error) { if (error.code !== 'SEED_INVALID' && error.name !== 'OperationError') throw error; label = error.code === 'SEED_INVALID' ? error.message : 'Essas palavras não abrem este backup. Tente de novo:'; }
+      }
+      return null;
+    }
+    if (payload && payload.format === 'financ-encrypted-v1') {
+      const password = await window.askSecret('Senha do backup (ou o PIN, em arquivos antigos):', false, true);
+      if (!password) return null;
+      try { return await FinancVault.unprotect(payload, password, context); }
+      catch (error) { throw new Error(error.name === 'OperationError' ? 'Senha incorreta.' : 'Este arquivo não é um backup deste app.'); }
+    }
+    throw new Error('Arquivo não é um backup criptografado.');
+  };
+  // Aceita o certificado FINANC e os exportados pelos apps antes dele (cripito-sim, gerenc-fin).
+  const CERT_CONTEXT = /^(financ|[a-z-]+):certificate$/;
+  window.importCertificate = async (payload, context) => {
+    // Certificado das 12 palavras: abre com as palavras deste aparelho (ou pede as do arquivo), sem senha.
+    if (payload && payload.format === FinancVault.seed.BACKUP_FORMAT) {
+      const cert = await window.importProtected(payload, 'financ:certificate');
+      if (!cert) throw new Error('Importação cancelada.');
+      if (!FinancVault.certOK(cert)) throw new Error('Certificado inválido.');
+      return cert;
+    }
+    if (payload && payload.format === 'financ-encrypted-v1') {
+      if (!CERT_CONTEXT.test(payload.context || '') && payload.context !== context) throw new Error('Certificado inválido.');
+      const pin = await window.askSecret('Senha do certificado (ou o PIN, em arquivos antigos):', false, true);
+      if (!pin) throw new Error('Importação cancelada.');
+      payload = await FinancVault.unprotect(payload, pin, payload.context);
+    } else if (!confirm('Este certificado antigo está sem criptografia. Importar e protegê-lo no cofre? Depois exporte uma cópia protegida.')) throw new Error('Importação cancelada.');
+    if (!payload || typeof payload.id !== 'string' || !/^[A-Za-z0-9_-]{1,80}$/.test(payload.id) || typeof payload.secret !== 'string' || atob(payload.secret).length !== 32) throw new Error('Certificado inválido.');
+    return payload;
+  };
+  // Certificado FINANC: um só para todos os apps, guardado cifrado no FINANC ID. O primeiro da lista é o atual;
+  // os anteriores continuam guardados para abrir backups antigos.
+  const CERT_KEYS = { 'cripito-sim': 'cripto-app-device-cert', 'gerenc-fin': 'livro_caixa_device_cert_v1' };
+  const randomB64 = size => btoa(String.fromCharCode(...crypto.getRandomValues(new Uint8Array(size))));
+  const newCert = () => ({ version: 1, id: 'cert-' + randomB64(12).replace(/[^a-zA-Z0-9]/g, '').slice(0, 16), secret: randomB64(32), createdAt: new Date().toISOString() });
+  // Com as 12 palavras, o certificado sai do hash delas: gerar e exportar pedem só o PIN, nunca senha.
+  const seedCert = async () => FinancVault.seed.certFromRoot(await vault.rootBytes());
+  window.FinancCert = {
+    get linked() { return Boolean(vault.key && vault.linked); },
+    get fromSeed() { return Boolean(vault.key && vault.hasSeed); },
+    get current() { return vault.certificates[0] || null; },
+    find(id) { return vault.certificates.find(c => c.id === id) || null; },
+    async add(cert, makeCurrent = true) {
+      if (!FinancVault.certOK(cert)) throw new Error('Certificado inválido.');
+      const others = vault.certificates.filter(c => c.id !== cert.id);
+      await vault.saveCertificates(makeCurrent ? [cert, ...others] : [...others, cert]);
+    },
+    async ensure() {
+      if (this.fromSeed) { const cert = await seedCert(); if (!this.current || this.current.id !== cert.id) await this.add(cert); return this.current; }
+      if (!this.current) await vault.saveCertificates([newCert()]);
+      return this.current;
+    },
+    // Confere o PIN; se o PIN único ainda não tem as 12 palavras, cria agora e mostra (uma vez). false se cancelado.
+    async askPin(label) {
+      if (!this.linked) throw new Error('Este app ainda usa um PIN próprio. Em Configurações, toque em "Usar o PIN único" e tente de novo.');
+      let created = null;
+      const ok = await withPin(label, async pin => { if (!vault.identity.hasSeed) created = await vault.revealSeed(pin); else await vault.verifyPin(pin); });
+      if (!ok) return false;
+      if (created) await showSeedDialog(created, 'Suas 12 palavras');
+      return true;
+    },
+    // Gerar = recriar a partir das 12 palavras (o mesmo certificado em qualquer aparelho). Pede só o PIN. null se cancelado.
+    async regenerate() {
+      if (!await this.askPin('Digite o PIN para gerar o certificado a partir das 12 palavras:')) return null;
+      const cert = await seedCert(); await this.add(cert); return cert;
+    },
+    // Exportar: arquivo protegido pelas 12 palavras (abre aqui direto; em outro aparelho, com as palavras). Pede só o PIN.
+    async export() {
+      if (!await this.askPin('Digite o PIN para baixar o certificado:')) return false;
+      const cert = await this.ensure();
+      const payload = await vault.exportBackup(cert, 'financ:certificate');
+      const url = URL.createObjectURL(new Blob([JSON.stringify(payload)], { type: 'application/json' }));
+      const a = document.createElement('a'); a.href = url; a.download = 'financ-' + cert.id + '.cert.json'; document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return true;
+    },
+    async importFile(payload) { const cert = await window.importCertificate(payload, 'financ:certificate'); await this.add(cert); return cert; },
+  };
+  // Certificado próprio de versões antigas do app: entra no FINANC (vira o atual só se ainda não houver um) e sai do cofre do app.
+  async function adoptCertificate() {
+    if (!vault.linked) return;
+    const key = CERT_KEYS[appId], raw = key && vault.getItem(key);
+    if (raw) {
+      const own = JSON.parse(raw);
+      if (FinancVault.certOK(own)) await window.FinancCert.add(own, !window.FinancCert.current);
+      vault.removeItem(key); await vault.flush();
+    }
+  }
+  // Mostrar ou ocultar a senha: botão de olho em todo campo de senha da página (kit e app), inclusive nos que
+  // aparecem depois (janelas de senha de backup, certificado, extrato). O PIN de 6 caixas fica de fora.
+  function addReveal(input) {
+    if (input.dataset.reveal || input.classList.contains('vault-pin-input') || !input.parentNode) return;
+    input.dataset.reveal = '1';
+    // Visível ou não, o texto não vai para corretor ortográfico nem para sugestões do teclado.
+    input.spellcheck = false; input.setAttribute('autocapitalize', 'none'); input.setAttribute('autocorrect', 'off');
+    const wrap = document.createElement('span'); wrap.className = 'pw-wrap';
+    input.parentNode.insertBefore(wrap, input); wrap.append(input);
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'pw-toggle';
+    const show = visible => {
+      input.type = visible ? 'text' : 'password';
+      button.setAttribute('aria-pressed', String(visible));
+      button.setAttribute('aria-label', visible ? 'Ocultar senha' : 'Mostrar senha'); button.title = button.getAttribute('aria-label');
+      button.innerHTML = icon(visible ? 'eye-off' : 'eye', 18);
+    };
+    button.addEventListener('pointerdown', event => event.preventDefault()); // não tira o foco do campo
+    button.addEventListener('click', () => { show(input.type === 'password'); input.focus({ preventScroll: true }); });
+    // Ao enviar ou limpar o formulário, volta a ocultar: o próximo uso começa escondido.
+    if (input.form) ['submit', 'reset'].forEach(name => input.form.addEventListener(name, () => show(false)));
+    wrap.append(button); show(false);
+  }
+  const revealAll = scope => { if (scope.querySelectorAll) scope.querySelectorAll('input[type="password"]').forEach(addReveal); if (scope.matches && scope.matches('input[type="password"]')) addReveal(scope); };
+  revealAll(document);
+  new MutationObserver(list => list.forEach(m => m.addedNodes.forEach(node => { if (node.nodeType === 1) revealAll(node); })))
+    .observe(document.body, { childList: true, subtree: true });
+})();

@@ -1,0 +1,63 @@
+# Build iOS do BarGestão (Capacitor) num Mac do GitHub: o iOS só compila no macOS (Xcode).
+# Sem certificado da Apple: gera um .ipa SEM ASSINATURA (instalar reassinando com o seu Apple ID: Sideloadly/AltStore)
+# e o app para o Simulador do Xcode. Com conta Apple Developer, dá para assinar e mandar ao TestFlight (README).
+name: Build iOS (Capacitor)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Instalar dependências (Capacitor e plugins via Swift Package Manager)
+        run: npm ci
+
+      - name: Copiar o app web para o projeto iOS
+        run: npx cap sync ios
+
+      - name: Compilar para iPhone (sem assinatura)
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+          mkdir -p saida/Payload
+          cp -R build/Build/Products/Release-iphoneos/App.app saida/Payload/
+          (cd saida && zip -qry BarGestao-ios-sem-assinatura.ipa Payload)
+
+      - name: Compilar para o Simulador do Xcode
+        run: |
+          xcodebuild -project ios/App/App.xcodeproj -scheme App -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build-sim \
+            CODE_SIGNING_ALLOWED=NO build
+          (cd build-sim/Build/Products/Release-iphonesimulator && zip -qry ../../../../saida/BarGestao-ios-simulador.zip App.app)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bargestao-ios
+          path: |
+            saida/BarGestao-ios-sem-assinatura.ipa
+            saida/BarGestao-ios-simulador.zip
+
+      - name: Publicar na Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSAO="v$(node -p "require('./package.json').version")-ios"
+          NOTAS="BarGestão para iOS (Capacitor), versão sem assinatura. Para instalar no iPhone, reassine com o seu Apple ID (Sideloadly ou AltStore); para testar no Mac, use o .zip no Simulador do Xcode. Veja o README."
+          if gh release view "$VERSAO" >/dev/null 2>&1; then
+            gh release upload "$VERSAO" saida/BarGestao-ios-sem-assinatura.ipa saida/BarGestao-ios-simulador.zip --clobber
+          else
+            gh release create "$VERSAO" saida/BarGestao-ios-sem-assinatura.ipa saida/BarGestao-ios-simulador.zip --title "$VERSAO" --notes "$NOTAS" --latest
+          fi
