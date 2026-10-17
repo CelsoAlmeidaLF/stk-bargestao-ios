@@ -1,5 +1,7 @@
 # BarGestão · app iOS (Capacitor)
 
+> **Arquivado em 16/10/2026:** a alternativa iOS foi retirada do PILOTO-02. O projeto fica aqui, somente leitura, para retomar o iOS no futuro (precisa de um Mac ou do GitHub Actions liberado, e de conta Apple Developer para distribuir). Nenhum build foi gerado.
+
 O **BarGestão Standard** (PWA `stk-app-multi-cm`, v2.8.0) como app de **iPhone**, com o mesmo código do [app Android em Capacitor](https://github.com/CelsoAlmeidaLF/stk-bargestao-capacitor): dados do bar num banco **SQLite** no aparelho, nada no armazenamento do navegador, **Governança Systekna online**.
 
 ## Baixar
@@ -7,7 +9,6 @@ O **BarGestão Standard** (PWA `stk-app-multi-cm`, v2.8.0) como app de **iPhone*
 - **[Releases](https://github.com/CelsoAlmeidaLF/stk-bargestao-ios/releases/latest)**:
   - `BarGestao-ios-sem-assinatura.ipa` — para iPhone (precisa reassinar, veja abaixo);
   - `BarGestao-ios-simulador.zip` — para o Simulador do Xcode, no Mac.
-- Página de instaladores: **https://celsoalmeidalf.github.io/stk-bargestao-android/**
 
 ### Por que "sem assinatura"
 
